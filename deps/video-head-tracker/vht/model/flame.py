@@ -141,6 +141,7 @@ class FlameHead(nn.Module):
 
         # add faces and uvs
         _, faces, aux = load_obj(flame_template_mesh_path, load_textures=False)
+        
         vertex_uvs = aux.verts_uvs
         face_uvs_idx = faces.textures_idx  # index into verts_uvs
 

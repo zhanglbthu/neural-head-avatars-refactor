@@ -1,0 +1,5 @@
+400009
+400023
+400018
+400042
+/root/autodl-tmp/data/metaface/nha/08

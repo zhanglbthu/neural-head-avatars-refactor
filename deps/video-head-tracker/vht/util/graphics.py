@@ -67,15 +67,15 @@ def calibrate_camera(
     flags = 0
     if K is not None:
         flags = (
-            cv2.CALIB_USE_INTRINSIC_GUESS
-            | cv2.CALIB_FIX_ASPECT_RATIO
-            | cv2.CALIB_FIX_PRINCIPAL_POINT
+            cv2.CALIB_USE_INTRINSIC_GUESS # use K as initial guess
+            | cv2.CALIB_FIX_ASPECT_RATIO # fix aspect ratio, fx/fy will be the same
+            | cv2.CALIB_FIX_PRINCIPAL_POINT # fix principal point at the center
         )
 
     if ignore_dist:
         flags |= (
-            cv2.CALIB_ZERO_TANGENT_DIST
-            | cv2.CALIB_FIX_K1
+            cv2.CALIB_ZERO_TANGENT_DIST # tangential distortion is zero
+            | cv2.CALIB_FIX_K1 # radial distortion is zero
             | cv2.CALIB_FIX_K2
             | cv2.CALIB_FIX_K3
         )

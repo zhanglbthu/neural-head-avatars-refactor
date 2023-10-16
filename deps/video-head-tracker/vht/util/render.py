@@ -149,24 +149,30 @@ class SHRenderer(torch.nn.Module):
                  screen_coords: N x H x W x 2  with x, y values following pytorch3ds NDC-coord system convention
                                 top left = +1, +1 ; bottom_right = -1, -1
         """
-        assert len(meshes) == len(cameras)
+        assert len(meshes) == len(cameras) # 1:1
+        
+        eps = None 
+        verts_world = meshes.verts_padded() # shape: N, V, 3 (1, 5023, 3)
 
-        eps = None
-        verts_world = meshes.verts_padded()
         verts_view = cameras.get_world_to_view_transform().transform_points(
             verts_world, eps=eps
-        )
+        ) # shape: N, V, 3 (1, 5023, 3)
+        # transform points from world to camera space  
+        
         projection_trafo = cameras.get_projection_transform().compose(
             cameras.get_ndc_camera_transform()
         )
         verts_ndc = projection_trafo.transform_points(verts_view, eps=eps)
-        verts_ndc[..., 2] = verts_view[..., 2]
+        verts_ndc[..., 2] = verts_view[..., 2] # z in camera space
+
+        
         meshes_ndc = meshes.update_padded(new_verts_padded=verts_ndc)
 
         fragments = self._rasterize_fragments(
             cameras, meshes_ndc, image_size, use_cache
         )
         screen_coords = self._compute_screen_coords(meshes_ndc, fragments, image_size)
+        
         return fragments, screen_coords
 
     def _rasterize_fragments(self, cameras, meshes_ndc, image_size, use_cache):
@@ -175,6 +181,7 @@ class SHRenderer(torch.nn.Module):
         """
 
         znear = cameras.get_znear()
+        
         if isinstance(znear, torch.Tensor):
             znear = znear.min().item()
         z_clip = None if znear is None else znear / 2

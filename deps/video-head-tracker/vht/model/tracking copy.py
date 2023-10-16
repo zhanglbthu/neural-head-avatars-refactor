@@ -100,26 +100,15 @@ class FlameTracker:
             dict(name_or_flags="--keyframes", type=int, nargs="*", default=()),
             dict(name_or_flags="--cutframes", type=int, nargs="*", default=()),
             dict(name_or_flags="--frame_rate", type=int, default=30),
-            # camera
-            dict(name_or_flags="--camera_names", type=str, nargs="*", default=()),
-            dict(name_or_flags="--root_path", type=str, default=""),
         ]
 
         return fields
 
-    def __init__(self, datasets, **kwargs):
+    def __init__(self, dataset, **kwargs):
 
         self._config = kwargs
 
-        if(len(datasets) == 0):
-            raise ValueError("datasets is empty")
-
-        n_frames = len(datasets[0]) # number of frames in dataset
-        # log camera_names and root_path
-        logger.info(f"camera_names: {self._config['camera_names']}")
-        logger.info(f"root_path: {self._config['root_path']}")
-        
-        n_view = len(datasets) # number of cameras
+        n_frames = len(dataset) # number of frames in dataset
 
         n_shape = self._config["n_shape"]
         n_expr = self._config["n_expr"]
@@ -128,9 +117,8 @@ class FlameTracker:
         device = self._config["device"]
 
         self._n_frames = n_frames
-        self._n_view = n_view
         self._calibrated = self._config["calibrated"] # if true, camera intrinsics and extrinsics are fixed
-        self._datasets = datasets
+        self._dataset = dataset
         self._device = device
 
         train_tensors = []
@@ -158,10 +146,9 @@ class FlameTracker:
         self._eyes_pose = [neutral_eyes.detach().clone() for _ in range(n_frames)]
 
         # rigid pose
-        # multi-view params
-        self._translations = [[torch.zeros(3).to(device) for _ in range(n_frames)] for _ in range(n_view)]
-        self._rotations = [[torch.zeros(3).to(device) for _ in range(n_frames)] for _ in range(n_view)]
-        
+        self._translation = [torch.zeros(3).to(device) for _ in range(n_frames)]
+        self._rotation = [torch.zeros(3).to(device) for _ in range(n_frames)]
+
         # texture and lighting params
         self._texture = torch.zeros(n_tex).to(device)
         self._lights = torch.zeros(9, 3).to(device)
@@ -175,28 +162,24 @@ class FlameTracker:
             + self._expr
             + self._neck_pose
             + self._jaw_pose
-            # + self._translation
-            # + self._rotation
+            + self._translation
+            + self._rotation
             + self._eyes_pose
         )
-        
+
         # camera definition
         if not self._calibrated:
             # K contains focal length and principle point
             self._K = torch.zeros(3).to(device)
             self._RT = torch.eye(3, 4).to(device)
             train_tensors += [self._K]
-        else:
-            # K and RT are fixed, init n_view cameras
-            self._K = torch.zeros(n_view, 3, 3).to(device)
-            self._RT = torch.zeros(n_view, 3, 4).to(device)
 
         for t in train_tensors:
             t.requires_grad = True
 
         # renderer for visualization, dense photometric energy
         self._render = SHRenderer()
-        self._image_size = datasets[0][0]["rgb"].shape[-2:]
+        self._image_size = dataset[0]["rgb"].shape[-2:]
 
         # decays for different quantities
         def make_decay(key, is_init, geometric):
@@ -286,135 +269,88 @@ class FlameTracker:
         logger.info(f"Start tracking FLAME in {self._n_frames} frames")
         for frame_idx in range(self._frame_idx, self._n_frames):
             
-            # 针对每个视角进行优化
+            # first initialize frame either from calibration or previous frame
+            with torch.no_grad():
+                self._initialize_frame(frame_idx)
+
+            # get all parameters for this frame optimization and create optimizer
+            # if 'is_init_frame' flag is set, the parameters will include not only the parameters
+            # of the frame but also of all keyframes in self._config['keyframes']
             is_init_frame = frame_idx == 0
-            
-            samples = []
-            
-            for camera_idx in range(self._n_view):
-                with torch.no_grad():
-                    self._initialize_frame(frame_idx, camera_idx)
-                samples.append(self._get_current_frame(frame_idx, is_init_frame, camera_idx))
-                self._K[camera_idx] = samples[camera_idx]["cam_intrinsic"]
-                self._RT[camera_idx] = samples[camera_idx]["cam_extrinsic"]
-                    
             train_params = self._get_train_parameters(frame_idx, is_init_frame)
-            optimizer = self._configure_optimizer(train_params, is_init_frame, is_cam=False)
+            optimizer = self._configure_optimizer(train_params, is_init_frame)
+            sample = self._get_current_frame(frame_idx, is_init_frame)
+
+            if is_init_frame and self._calibrated:
+                print("camera intrinsics: ", sample["cam_intrinsic"])
+                # print translation and rotation
+                # print("translation: ", self._translation[0])
+                # print("rotation: ", self._rotation[0])
             if is_init_frame or frame_idx in self._config["cutframes"]:
                 num_steps = self._config["init_steps"]
             else:
                 num_steps = self._config["steps_per_frame"]
 
-            # # update _K and _RT
-            # if self._calibrated:
-            #     self._K[camera_idx] = sample["cam_intrinsic"]
-            #     self._RT[camera_idx] = sample["cam_extrinsic"]    
-                
             logger.info(f"Start optimization of frame {frame_idx}")
             for step_i in range(num_steps):
-                optimizer.zero_grad()
-                for camera_idx in range(self._n_view):
-                    
-                    sample = samples[camera_idx]
-                    cam_params = self._get_cam_params(frame_idx, is_init_frame, camera_idx)
-                    cam_optimizer = self._configure_optimizer(cam_params, is_init_frame, is_cam=True)
-                    cam_optimizer.zero_grad()
-                   
-                    self._clear_cache()
-                    
-                    # log K
-                    if not self._calibrated:
-                        global_step = self._global_step(frame_idx, step_i, camera_idx)
-                        self._logger.add_scalar(
-                            "camera/focal_length", self._K[0], global_step
-                        )
-                        self._logger.add_scalar("camera/cx", self._K[1], global_step)
-                        self._logger.add_scalar("camera/cy", self._K[2], global_step)
-                    
-                    for _ in range(self._config["sub_steps"]):
-                        self._fill_cam_params_into_sample(sample)
-                        E_total, log_dict, verts, lmks, albedos = self._compute_energy(
-                            sample, frame_idx, is_init_frame, step_i, camera_idx
-                        )
-                        
-                        E_total.backward()
-                        # 打印梯度
-                    cam_optimizer.step()
 
-                    self._clear_cache() 
+                # compute loss and update parameters
+                self._clear_cache()
 
-                
-                    # log energy terms and visualize
-                    is_last = step_i == num_steps - 1
-                    has_to_log_energy = (
-                        step_i % self._config["energy_log_freq"] == 0 or is_last
+                # log K
+                if not self._calibrated:
+                    global_step = self._global_step(frame_idx, step_i)
+                    self._logger.add_scalar(
+                        "camera/focal_length", self._K[0], global_step
                     )
-                    has_to_log_img = step_i % self._config["img_log_freq"] == 0 or is_last
-
-                    if has_to_log_energy or has_to_log_img:
-                        with torch.no_grad():
-                            res = self._compute_energy(
-                                sample, frame_idx, is_init_frame, step_i, camera_idx
-                            )
-                            E_total, log_dict, verts, lmks, albedos = res
-
-                        if has_to_log_energy:
-                            self._log_scalars(log_dict, frame_idx, step_i)
-
-                        if has_to_log_img:
-                            self._log_tracking(
-                                verts, lmks, albedos, sample, frame_idx, step_i, camera_idx
-                            )
-                optimizer.step()
+                    self._logger.add_scalar("camera/cx", self._K[1], global_step)
+                    self._logger.add_scalar("camera/cy", self._K[2], global_step)
                 
+                for _ in range(self._config["sub_steps"]):
+                    self._fill_cam_params_into_sample(sample)
+                    E_total, log_dict, verts, lmks, albedos = self._compute_energy(
+                        sample, frame_idx, is_init_frame, step_i
+                    )
+                    optimizer.zero_grad()
+                    E_total.backward()
+                    optimizer.step()
+
+                self._clear_cache()
+
+                # log energy terms and visualize
+                is_last = step_i == num_steps - 1
+                has_to_log_energy = (
+                    step_i % self._config["energy_log_freq"] == 0 or is_last
+                )
+                has_to_log_img = step_i % self._config["img_log_freq"] == 0 or is_last
+
+                if has_to_log_energy or has_to_log_img:
+                    with torch.no_grad():
+                        res = self._compute_energy(
+                            sample, frame_idx, is_init_frame, step_i
+                        )
+                        E_total, log_dict, verts, lmks, albedos = res
+
+                    if has_to_log_energy:
+                        self._log_scalars(log_dict, frame_idx, step_i)
+
+                    if has_to_log_img:
+                        self._log_tracking(
+                            verts, lmks, albedos, sample, frame_idx, step_i
+                        )
             if is_init_frame and not self._calibrated:
                 logger.info(
                     f"Camera intrinsics optimized after initialization frame: {self._K}"
                 )
-            
+
             self._frame_idx = frame_idx + 1
             if frame_idx > 0 and frame_idx % self._config["save_period"] == 0:
                 self._export_result()
 
-        # 对于每一视角每一帧，根据已有参数渲染出一张图片并保存
-        for camera_idx in range(self._n_view):
-            for frame_idx in range(self._n_frames):
-                self._render_frame(frame_idx, camera_idx)
-        
         logger.info("Finished optimization. Saving results ...")
         self._export_result(make_visualization=True)
 
-    def _render_frame(self, frame_idx, camera_idx):
-        """
-        Renders a single frame and saves it to disk
-        :param frame_idx:
-        :return:
-        """
-        sample = self._get_current_frame(frame_idx, False, camera_idx)
-        self._fill_cam_params_into_sample(sample)
-        indices = [frame_idx]
-        ret = self._flame(
-            self._shape[None, ...].expand(len(indices), -1),
-            _to_batch(self._expr, indices),
-            _to_batch(self._rotations[camera_idx], indices),
-            _to_batch(self._neck_pose, indices),
-            _to_batch(self._jaw_pose, indices),
-            _to_batch(self._eyes_pose, indices),
-            _to_batch(self._translations[camera_idx], indices),
-        )
-
-        verts, lmks = ret[0], ret[1]
-        albedos = self._flame_tex(self._texture[None, ...].expand(len(indices), -1))
-        image = self._visualize_tracking(verts, lmks, albedos, sample)
-
-        # save image to render_camera_idx
-        out_dir = self._out_dir / f"render_camera_{camera_idx}"
-        if not out_dir.exists():
-            os.makedirs(out_dir)
-        out_path = out_dir / f"{frame_idx:05d}.png"
-        torchvision.utils.save_image(image, out_path)
-
-    def _get_current_frame(self, frame_idx, include_keyframes=False, camera_idx=0):
+    def _get_current_frame(self, frame_idx, include_keyframes=False):
         """
         Creates a single item batch from the frame data at index frame_idx in the dataset.
         If include_keyframes option is set, keyframe data will be appended to the batch. However,
@@ -429,7 +365,7 @@ class FlameTracker:
             indices += self._config["keyframes"]
 
         for idx in indices:
-            sample = self._datasets[camera_idx][idx]
+            sample = self._dataset[idx]
             sample["frame_index"] = idx
 
             for k, v in sample.items():
@@ -482,8 +418,8 @@ class FlameTracker:
             "expr": [],
             "neck": [],
             "jaw": [],
-            # "translation": [],
-            # "rotation": [],
+            "translation": [],
+            "rotation": [],
             "eyes": [],
         }
 
@@ -501,27 +437,12 @@ class FlameTracker:
             params["eyes"].append(self._eyes_pose[idx])
             params["neck"].append(self._neck_pose[idx])
             params["jaw"].append(self._jaw_pose[idx])
-            # params["translation"].append(self._translation[idx])
-            # params["rotation"].append(self._rotation[idx])
-            # change
-            # params["translation"].append(self._translations[camera_idx][idx].requires_grad_())
-            # params["rotation"].append(self._rotations[camera_idx][idx].requires_grad_())
-            
+            params["translation"].append(self._translation[idx])
+            params["rotation"].append(self._rotation[idx])
+
         return params
 
-    def _get_cam_params(self, frame_idx, include_keyframes=False, camera_idx=0):
-        indices = [frame_idx]
-        params = {
-            "translation": [],
-            "rotation": [],
-        }
-        for idx in indices:
-            params["translation"].append(self._translations[camera_idx][idx])
-            params["rotation"].append(self._rotations[camera_idx][idx])
-        return params
-        
-    
-    def _configure_optimizer(self, params, is_init_frame=True, is_cam=False):
+    def _configure_optimizer(self, params, is_init_frame=True):
         """
         Creates optimizer for the given set of parameters
         :param params:
@@ -533,19 +454,15 @@ class FlameTracker:
         default_lr = self._config["lr"]
 
         # dict map group name to param dict keys
-        group_def = {}
-        if is_cam:
-            group_def["position"] = ["translation"]
-        if is_init_frame and not is_cam:
+        group_def = {"pos": ["translation"]}
+        if is_init_frame:
             if not self._calibrated:
                 group_def["cam"] = ["cam"]
             group_def["light"] = ["lights"]
 
         # dict map group name to lr
-        group_lr = {}
-        if is_cam:
-            group_lr["position"] = self._config["pos_lr"]
-        if is_init_frame and not is_cam:
+        group_lr = {"pos": self._config["pos_lr"]}
+        if is_init_frame:
             if not self._calibrated:
                 group_lr["cam"] = self._config["cam_lr"]
             group_lr["light"] = self._config["light_lr"]
@@ -565,18 +482,18 @@ class FlameTracker:
         optim = torch.optim.Adam(param_groups, lr=default_lr)
         return optim
 
-    def _initialize_frame(self, frame_idx, camera_idx=0):
+    def _initialize_frame(self, frame_idx):
         """
         Initializes parameters of frame frame_idx
         :param frame_idx:
         :return:
         """
         if frame_idx > 0:
-            self._initialize_from_previous(frame_idx, camera_idx)
+            self._initialize_from_previous(frame_idx)
         else:
-            self._initialize_from_calibration(frame_idx, camera_idx)
+            self._initialize_from_calibration(frame_idx)
 
-    def _initialize_from_previous(self, frame_idx, camera_idx):
+    def _initialize_from_previous(self, frame_idx):
         """
         Initializes the flame parameters with the optimized ones from the previous frame
         :param frame_idx:
@@ -589,14 +506,13 @@ class FlameTracker:
             self._expr,
             self._neck_pose,
             self._jaw_pose,
+            self._translation,
+            self._rotation,
             self._eyes_pose,
         ]:
             param[frame_idx].data = param[frame_idx - 1].detach().clone().data
-            
-        for param in [self._translations, self._rotations]:
-            param[camera_idx][frame_idx].data = param[camera_idx][frame_idx - 1].detach().clone().data
 
-    def _initialize_from_calibration(self, frame_idx, camera_idx):
+    def _initialize_from_calibration(self, frame_idx):
         """
         Initializes frame frame_idx from camera calibration. Right now this is only supported
         for frame 0
@@ -605,7 +521,7 @@ class FlameTracker:
         """
 
         device = self._device
-        sample = self._get_current_frame(frame_idx, include_keyframes=True, camera_idx=camera_idx)
+        sample = self._get_current_frame(frame_idx, include_keyframes=True)
         assert frame_idx == sample["frame_index"][0] == 0
 
         # get image resolution
@@ -615,7 +531,7 @@ class FlameTracker:
         lmks2d = sample["lmk2d"].clone()
         
         lmks2d, confidence = lmks2d[:, :, :2], lmks2d[:, :, 2]
-        _, lmks3d, _ = self._forward_flame(frame_idx, include_keyframes=True, camera_idx=camera_idx)
+        _, lmks3d, _ = self._forward_flame(frame_idx, include_keyframes=True)
 
         # calibrate camera using lmk correspondences as pattern
         world_pts, img_pts = [], []
@@ -663,6 +579,7 @@ class FlameTracker:
         flip_xy = R.from_rotvec([0, 0, np.pi]) # rotation matrix: rotate pi around z axis
         
         for i, (r, t, frame_i) in enumerate(zip(rs, ts, sample["frame_index"])):
+            # print("r, t, frame_i: ", r, t, frame_i)
             r, t = r.flatten(), t.flatten() 
             
             # cam coord from opencv ( x right, y down)
@@ -678,6 +595,7 @@ class FlameTracker:
                     RT = np.eye(4)
                     RT[:3, :3] = R.from_rotvec(r).as_matrix()
                     RT[:3, 3] = t
+                    print("RT: ", RT)
                     return RT
 
                 RT_o = rt2RT(r, t)
@@ -702,8 +620,11 @@ class FlameTracker:
                     r = r.as_rotvec() 
 
             # init weights
-            self._translations[camera_idx][frame_i].data = torch.from_numpy(t).float().to(device)
-            self._rotations[camera_idx][frame_i].data = torch.from_numpy(r).float().to(device)
+            self._translation[frame_i].data = torch.from_numpy(t).float().to(device)
+            self._rotation[frame_i].data = torch.from_numpy(r).float().to(device)
+        # print translation and rotation shape
+        # print("translation shape: ", self._translation[frame_idx].shape)
+        # print("rotation shape: ", self._rotation[frame_idx].shape)
 
     def _project_points(self, points_3d, camera_matrix, r, t):
         points_2d, _ = cv2.projectPoints(points_3d, r, t, camera_matrix, None)
@@ -722,7 +643,7 @@ class FlameTracker:
             indices += self._config["keyframes"]
         return indices
 
-    def _forward_flame(self, frame_idx, include_keyframes, camera_idx=0):
+    def _forward_flame(self, frame_idx, include_keyframes):
         """
         Evaluates the flame model using the given parameters
         :param flame_params:
@@ -733,15 +654,19 @@ class FlameTracker:
         ret = self._flame(
             self._shape[None, ...].expand(len(indices), -1),
             _to_batch(self._expr, indices),
-            _to_batch(self._rotations[camera_idx], indices),
+            _to_batch(self._rotation, indices),
             _to_batch(self._neck_pose, indices),
             _to_batch(self._jaw_pose, indices),
             _to_batch(self._eyes_pose, indices),
-            _to_batch(self._translations[camera_idx], indices),
+            _to_batch(self._translation, indices),
         )
 
         verts, lmks = ret[0], ret[1]
         albedos = self._flame_tex(self._texture[None, ...].expand(len(indices), -1))
+        # print verts, lmks, albedos shape
+        # print("verts shape: ", verts.shape)
+        # print("lmks shape: ", lmks.shape)
+        # print("albedos shape: ", albedos.shape)
         return verts, lmks, albedos
 
     def _rasterize_flame(self, sample, vertices, scale=1, use_cache=True):
@@ -767,10 +692,16 @@ class FlameTracker:
         K = sample["cam_intrinsic"]
         RT = sample["cam_extrinsic"]
         H, W = self._image_size
+        # print("H, W: ", H, W)
+        # print camera intrinsics and extrinsics
+        # print("cam_intrinsic: ", K)
+        # print("cam_extrinsic: ", RT)
 
         H, W = int(H * scale), int(W * scale)
         K = K * scale
         cameras = create_camera_objects(K, RT, (H, W), self._device)
+        # print cameras center
+        # print("cameras center: ", cameras.get_camera_center())
         
         # vertices : (B, N, 3) B = 1, N = 5023
         # faces : (F, 3) F = 9700
@@ -798,6 +729,7 @@ class FlameTracker:
         fragments = rasterization_result["fragments"] 
         # shape: (B, H, W, K) B = 1, H = 2048, W = 1336, K = 1(faces_per_pixel) 
         meshes = rasterization_result["meshes"]
+        # print("meshes shape: ", meshes.verts_padded().shape)
 
         B = len(meshes) # B = 1
 
@@ -900,7 +832,7 @@ class FlameTracker:
 
         return reg_shape.sum(), reg_expr.sum() / len(indices), reg_tex.sum()
 
-    def _compute_pose_energy(self, frame_idx, include_keyframes, camera_idx):
+    def _compute_pose_energy(self, frame_idx, include_keyframes):
         """
         Regularizes the pose of the flame head model towards neutral joint locations
         """
@@ -929,12 +861,12 @@ class FlameTracker:
             E_pos += diff.sum() / len(indices) * self._config[f"w_pos_{weight}"]
 
         if frame_idx == 0:
-            trans = _to_batch(self._translations[camera_idx], indices)
+            trans = _to_batch(self._translation, indices)
             ref_trans = torch.mean(trans, dim=0, keepdim=True)
         else:
             trans, ref_trans = (
-                self._translations[camera_idx][frame_idx],
-                self._translations[camera_idx][frame_idx - 1],
+                self._translation[frame_idx],
+                self._translation[frame_idx - 1],
             )
 
         diff_trans = (trans - ref_trans) ** 2
@@ -956,7 +888,7 @@ class FlameTracker:
         diff = (right_eye - left_eye) ** 2
         return diff.sum() / len(indices)
 
-    def _compute_energy(self, sample, frame_idx, include_keyframes, step_i, camera_idx=0):
+    def _compute_energy(self, sample, frame_idx, include_keyframes, step_i):
         """
         Compute total energy for frame frame_idx
         :param sample:
@@ -965,11 +897,11 @@ class FlameTracker:
         frame energy
         :return: loss, log dict, predicted vertices and landmarks
         """
-        verts, lmks, albedos = self._forward_flame(frame_idx, include_keyframes, camera_idx)
+        verts, lmks, albedos = self._forward_flame(frame_idx, include_keyframes)
         rasterization_results = self._rasterize_flame(
             sample, verts, scale=self._config["sampling_scale"], use_cache=True
         )
-        
+
         E_lmk, E_eyes_lmk = self._compute_lmk_energy(frame_idx, sample, lmks)
 
         E_photo = self._compute_photometric_energy(
@@ -980,7 +912,7 @@ class FlameTracker:
             frame_idx, include_keyframes
         )
 
-        E_pos = self._compute_pose_energy(frame_idx, include_keyframes, camera_idx)
+        E_pos = self._compute_pose_energy(frame_idx, include_keyframes)
         E_eyes_sym = self._compute_eye_symmetry_energy(frame_idx, include_keyframes)
 
         E_total = (
@@ -1008,7 +940,7 @@ class FlameTracker:
 
         return E_total, log_dict, verts, lmks, albedos
 
-    def _global_step(self, frame_idx, step_idx, camera_idx=0):
+    def _global_step(self, frame_idx, step_idx):
         """
         Returns unique global step number
         :param frame_idx:
@@ -1019,7 +951,7 @@ class FlameTracker:
             step_id = step_idx
         else:
             step_id = self._config["init_steps"]
-            step_id += (frame_idx - 1) * self._config["steps_per_frame"] * self._n_view + step_idx * (camera_idx + 1)
+            step_id += (frame_idx - 1) * self._config["steps_per_frame"] + step_idx
         return step_id
 
     def _log_scalars(self, log_dict, frame_idx, step_i):
@@ -1045,7 +977,7 @@ class FlameTracker:
 
         logger.info(f"Training progress frame {frame_idx} step {step_i}: {log_msg}")
 
-    def _log_tracking(self, vertices, lmks, albedos, sample, frame_idx, step_i, camera_idx):
+    def _log_tracking(self, vertices, lmks, albedos, sample, frame_idx, step_i):
         """
         Logs current tracking visualization to tensorboard
         :param vertices:
@@ -1059,17 +991,16 @@ class FlameTracker:
         """
         step_id = self._global_step(frame_idx, step_i)
         log_figure = self._visualize_tracking(vertices, lmks, albedos, sample)
-        # 对于每个camera_idx的相机保存不同frame_idx的图片
-        self._logger.add_image(f"tracking_{camera_idx}_{frame_idx}", log_figure, step_id)
+        self._logger.add_image("tracking_result", log_figure, step_id)
 
-        log_figure = self._visualize_flame_multiview(vertices, albedos, sample, camera_idx)
-        self._logger.add_image(f"flame_multiview_{camera_idx}_{frame_idx}", log_figure, step_id)
+        log_figure = self._visualize_flame_multiview(vertices, albedos, sample)
+        self._logger.add_image("flame_multiview", log_figure, step_id)
 
         # log_figure = self._visualize_trajectory(sample)
         # self._logger.add_image("translation_trajectory", log_figure, step_id)
 
     @torch.no_grad()
-    def _visualize_flame_multiview(self, vertices, albedos, sample, camera_idx):
+    def _visualize_flame_multiview(self, vertices, albedos, sample):
 
         # prepare sample to be used with three instances
         new_sample = {}
@@ -1085,7 +1016,7 @@ class FlameTracker:
         vertices = vertices[0]
 
         # subtract translation before rotating
-        t = self._translations[camera_idx][frame_idx][None]
+        t = self._translation[frame_idx][None]
         vertices_center = vertices - t
 
         # rotate
@@ -1171,7 +1102,7 @@ class FlameTracker:
             return torchvision.utils.make_grid(images, nrow=4)
 
     @torch.no_grad()
-    def _visualize_trajectory(self, sample, camera_idx):
+    def _visualize_trajectory(self, sample):
         """
         Visualizes the trajectory of the tracked model in camera space. That is the trajectory
         of the translation vectors
@@ -1179,7 +1110,7 @@ class FlameTracker:
         :return:
         """
         indices = list(range(max(sample["frame_index"])))
-        translations = _to_batch(self._translations[camera_idx], indices).detach().cpu().numpy()
+        translations = _to_batch(self._translation, indices).detach().cpu().numpy()
 
         fig = plt.figure(figsize=(2, 2), dpi=100, tight_layout=True)
         ax = fig.add_subplot(projection="3d")
@@ -1215,9 +1146,9 @@ class FlameTracker:
 
         # init animation
         fig, ax = plt.subplots(figsize=(20, 4))
-        sample = self._get_current_frame(0, include_keyframes=False, camera_idx=0)
+        sample = self._get_current_frame(0, include_keyframes=False)
         self._fill_cam_params_into_sample(sample)
-        verts, lmks, albedos = self._forward_flame(0, include_keyframes=False, camera_idx=0)
+        verts, lmks, albedos = self._forward_flame(0, include_keyframes=False)
         frame_img = self._visualize_tracking(verts, lmks, albedos, sample).cpu().numpy()
         actors = [ax.imshow(frame_img.transpose(1, 2, 0))]
         ax.axis("off")
@@ -1262,6 +1193,8 @@ class FlameTracker:
         """
         # save parameters
         keys = [
+            "rotation",
+            "translation",
             "neck_pose",
             "jaw_pose",
             "eyes_pose",
@@ -1274,14 +1207,16 @@ class FlameTracker:
             "n_processed",
         ]
         values = [
+            self._rotation,
+            self._translation,
             self._neck_pose,
             self._jaw_pose,
             self._eyes_pose,
             self._shape,
             self._expr,
             self._texture,
-            np.array(self._datasets[0].frame_list[: len(self._expr)]),
-            np.array(self._datasets[0].view_list[: self._n_frames]),
+            np.array(self._dataset.frame_list[: len(self._expr)]),
+            np.array(self._dataset.view_list[: self._n_frames]),
             self._lights[None].expand(self._n_frames, -1, -1),
             self._frame_idx,
         ]
@@ -1289,11 +1224,7 @@ class FlameTracker:
         if not self._calibrated:
             keys += ["K", "RT"]
             values += [self._K, self._RT]
-        else:
-            keys += ["K", "RT"]
-            assert len(self._K) == len(self._RT) == self._n_view
-            values += [self._K, self._RT]
-        
+
         export_dict = {}
         for k, v in zip(keys, values):
             if not isinstance(v, np.ndarray):
@@ -1303,38 +1234,13 @@ class FlameTracker:
                     v = v.detach().cpu().numpy()
             export_dict[k] = v
 
-        # 将_translations和_rotations类型为list，包含不同视角的list，每个list里有tensor，devide=cuda
-        # 现在将他们转换为numpy，然后保存
-        translations_np = []
-        rotations_np = []
-
-        for i in range(self._n_view):
-            view_translations = []
-            view_rotations = []
-            for j in range(self._n_frames):
-                translation = self._translations[i][j].detach().cpu().numpy()
-                rotation = self._rotations[i][j].detach().cpu().numpy()
-                view_translations.append(translation)
-                view_rotations.append(rotation)
-            translations_np.append(view_translations)
-            rotations_np.append(view_rotations)
-
-        translations_np = np.array(translations_np)
-        rotations_np = np.array(rotations_np)
-
-        # Reshape the arrays
-        translations_np = translations_np.reshape(self._n_view, self._n_frames, 3)
-        rotations_np = rotations_np.reshape(self._n_view, self._n_frames, 3)
-        
-        export_dict["translations"] = translations_np
-        export_dict["rotations"] = rotations_np
-        
         export_dict["image_size"] = np.array(self._image_size)
         fname = fname if fname is not None else "tracked_flame_params.npz"
         np.savez(self._out_dir / fname, **export_dict)
         # bytesbuffer = io.BytesIO()
         # with fsspec.open( "wb") as f:
         #    f.write(bytesbuffer.getvalue())
+
         # save tracking animation
         if make_visualization:
             self._save_tracking_animation(self._out_dir / "tracking_visual.mp4")
