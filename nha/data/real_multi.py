@@ -13,6 +13,7 @@ import pytorch_lightning as pl
 import PIL.Image as Image
 import argparse
 import os
+import sys
 
 logger = get_logger(__name__)
 
@@ -68,7 +69,10 @@ class RealDataset(Dataset):
     def __init__(
         self,
         path,
-        camera_idx=0, # change
+        
+        camera_ids, # change
+        root_path, # change
+        
         frame_filter=None,
         tracking_results_path=None,
         tracking_resolution=None,
@@ -108,7 +112,22 @@ class RealDataset(Dataset):
         """
         super().__init__()
         self._path = Path(path)
-        self._camera_idx = camera_idx # change
+        
+        # convert camera_ids to list
+        if isinstance(camera_ids, str):
+            camera_ids = camera_ids.split(',')
+            camera_ids = [int(i) for i in camera_ids]
+        
+        self._n_cameras = len(camera_ids)
+        
+        self._camera_ids = camera_ids # change
+        self._root_path = root_path # change
+        
+        self._paths = []
+        # root path + 每个camera id后两位
+        for camera_id in self._camera_ids:
+            self._paths.append(self._root_path + '/' + str(camera_id)[-2:])
+        
         self._has_lmks = load_lmk
         self._has_flame = load_flame
         self._has_camera = load_camera
@@ -139,7 +158,10 @@ class RealDataset(Dataset):
 
         self._views = [] # list of image_0000.png
 
-        self._load(frame_filter)
+        # print self._views shape
+
+        self._load(frame_filter) # shape: (n_cameras, len(frame_filter))
+        
         self._tracking_results = (
             dict(np.load(tracking_results_path))
             if tracking_results_path is not None
@@ -151,9 +173,12 @@ class RealDataset(Dataset):
             assert "image_size" in self._tracking_results
             self._tracking_resolution = self._tracking_results["image_size"]
 
-        self._views = sorted(self._views, key=lambda x: frame2id(x.parent.name))
+        # self._views = sorted(self._views, key=lambda x: frame2id(x.parent.name))
+        for i in range(len(self._views)):
+            self._views[i] = sorted(self._views[i], key=lambda x: view2id(x.name)) # change
 
-        self.max_frame_id = max([frame2id(x.parent.name) for x in self._views])
+        # self.max_frame_id = max([frame2id(x.parent.name) for x in self._views]) 
+        self.max_frame_id = max([frame2id(x.parent.name) for x in self._views[0]]) # change
 
     def _load(self, frame_filter):
         """
@@ -161,15 +186,25 @@ class RealDataset(Dataset):
         The results are stored in the respective member
         variables.
         """
-
+        frames = []
         # Obtain frame folders
         if frame_filter is None:
-            frames = [f for f in os.listdir(self._path) if f.startswith("frame_")]
+            for path in self._paths:
+                frames.append([f for f in os.listdir(path) if f.startswith("frame_")])
         else:
-            frames = [f"frame_{f:04d}" for f in frame_filter]
+            for path in self._paths:
+                frames.append([f"frame_{f:04d}" for f in frame_filter])
+        # print frames shape
+    
+        # change
+        # for f in frames:
+        #     self._views.append(self._path / f / "image_0000.png")
 
-        for f in frames:
-            self._views.append(self._path / f / "image_0000.png")
+        for path, frame_names in zip(self._paths, frames):
+            path_views = []
+            for frame_name in frame_names:
+                path_views.append(Path(path) / frame_name / "image_0000.png")
+            self._views.append(path_views)
 
         if (
             frame_filter is not None
@@ -180,9 +215,11 @@ class RealDataset(Dataset):
 
     def __len__(self):
         if self._tracking_results is None:
-            return len(self._views)
+            # return len(self._views)
+            return len(self._views[0]) # change
         else:
-            return min(len(self._views), len(self._tracking_results["expr"]))
+            # return min(len(self._views), len(self._tracking_results["expr"]))
+            return min(len(self._views[0]), len(self._tracking_results["expr"])) # change
 
     def _get_eye_info(self, sample):
         if not sample["frame"] in self._eye_info_cache:
@@ -240,30 +277,53 @@ class RealDataset(Dataset):
         """
         Get i-th sample from the dataset.
         """
+        # self._views shape : (n_cameras, len(frame_filter))
+        # view = self._views[i] # image_0000.png for some frame
+        view = []
+        frame_path = []
+        for j in range(self._n_cameras):
+            view.append(self._views[j][i]) # change
+            frame_path.append(view[j].parent) # change
 
-        view = self._views[i] # image_0000.png for some frame
-        frame_path = view.parent # frame dir
+        # frame_path = view.parent # frame dir
         sample = {}
 
         # subject and frame info
-        sample["frame"] = frame2id(frame_path.name) # e.g. 0000
-        subject = frame_path.parent.name
+        sample["frame"] = frame2id(frame_path[0].name) # e.g. 0000
+        # subject = frame_path.parent.name
+        # sample["subject"] = subject
+        subject = [] # change
+        for j in range(self._n_cameras):
+            subject.append(frame_path[j].parent.name) 
         sample["subject"] = subject
-        
-        # 获取camera_idx
-        sample["camera_idx"] = self._camera_idx # change
 
-        rgba = ttf.to_tensor(Image.open(view).convert("RGBA"))
-        sample["rgb"] = (rgba[:3] - 0.5) / 0.5
+        # rgba = ttf.to_tensor(Image.open(view).convert("RGBA"))
+        # sample["rgb"] = (rgba[:3] - 0.5) / 0.5
+        rgba = [] # change
+        for j in range(self._n_cameras):
+            rgba.append(ttf.to_tensor(Image.open(view[j]).convert("RGBA")))
+        
+        # convert list to tensor
+        rgba = torch.stack(rgba, dim=0)
+        sample["rgb"] = (rgba[:, :3] - 0.5) / 0.5 
 
         # segmentation
         if self._has_seg:
-            seg_path = view.parent / view.name.replace("image", "seg")
-            sample["seg"] = torch.from_numpy(np.array(Image.open(seg_path))).unsqueeze(
-                0
-            )
+            # seg_path = view.parent / view.name.replace("image", "seg")
+            # sample["seg"] = torch.from_numpy(np.array(Image.open(seg_path))).unsqueeze(
+            #     0
+            # )
+            seg_path = [] # change
+            for j in range(self._n_cameras):
+                seg_path.append(frame_path[j] / view[j].name.replace("image", "seg"))
+            seg = []
+            for j in range(self._n_cameras):
+                seg.append(torch.from_numpy(np.array(Image.open(seg_path[j]))).unsqueeze(0))
+            seg = torch.stack(seg, dim=0)
+            sample["seg"] = seg
 
         # landmarks
+        # todo
         if self._has_lmks:
             path = frame_path / view.name.replace("image", "keypoints_static").replace(
                 ".png", ".json"
@@ -304,8 +364,7 @@ class RealDataset(Dataset):
             sample["flame_pose"] = torch.from_numpy(
                 np.concatenate(
                     [
-                        # tr["rotation"][j],
-                        tr["rotations"][self._camera_idx][j], # change
+                        tr["rotation"][j],
                         tr["neck_pose"][j],
                         tr["jaw_pose"][j],
                         tr["eyes_pose"][j],
@@ -313,8 +372,7 @@ class RealDataset(Dataset):
                     axis=0,
                 )
             ).float()
-            # sample["flame_trans"] = torch.from_numpy(tr["translation"][j]).float()
-            sample["flame_trans"] = torch.from_numpy(tr["translations"][self._camera_idx][j]).float()
+            sample["flame_trans"] = torch.from_numpy(tr["translation"][j]).float()
 
         # camera
         if self._has_camera:
@@ -327,19 +385,17 @@ class RealDataset(Dataset):
             fy_scale = max(track_h, track_w) * img_h / track_h
             cx_scale = img_w
             cy_scale = img_h
-            if len(tr["K"][self._camera_idx].shape) == 1:
+            if len(tr["K"].shape) == 1:
                 sample["cam_intrinsic"] = create_intrinsics_matrix(
-                    fx=tr["K"][self._camera_idx][0] * fx_scale,
-                    fy=tr["K"][self._camera_idx][0] * fy_scale,
-                    px=tr["K"][self._camera_idx][1] * cx_scale,
-                    py=tr["K"][self._camera_idx][2] * cy_scale,
+                    fx=tr["K"][0] * fx_scale,
+                    fy=tr["K"][0] * fy_scale,
+                    px=tr["K"][1] * cx_scale,
+                    py=tr["K"][2] * cy_scale,
                 )
             else:
-                assert tr["K"][self._camera_idx].shape[0] == 3 and tr["K"][self._camera_idx].shape[1] == 3
-                # sample["cam_intrinsic"] = torch.from_numpy(tr["K"]).float()
-                sample["cam_intrinsic"] = torch.from_numpy(tr["K"][self._camera_idx]).float() # change
-            # sample["cam_extrinsic"] = torch.from_numpy(tr["RT"]).float()
-            sample["cam_extrinsic"] = torch.from_numpy(tr["RT"][self._camera_idx]).float() # change
+                assert tr["K"].shape[0] == 3 and tr["K"].shape[1] == 3
+                sample["cam_intrinsic"] = torch.from_numpy(tr["K"]).float()
+            sample["cam_extrinsic"] = torch.from_numpy(tr["RT"]).float()
 
         if self._has_light:
             tr = self._tracking_results
@@ -365,14 +421,14 @@ class RealDataset(Dataset):
     @property
     def frame_list(self):
         frames = []
-        for view in self._views:
+        for view in self._views[0]: # change
             frames.append(frame2id(view.parent.name))
         return frames
 
     @property
     def view_list(self):
         views = []
-        for view in self._views:
+        for view in self._views[0]: # change
             views.append(view.name)
         return views
 
@@ -381,7 +437,8 @@ class RealDataModule(pl.LightningDataModule):
     def __init__(
         self,
         data_path,
-        camera_idx, # change
+        camera_ids,
+        root_path,
         split_config=None,
         tracking_results_path=None,
         tracking_resolution=None,
@@ -416,7 +473,10 @@ class RealDataModule(pl.LightningDataModule):
         """
         super().__init__()
         self._path = Path(data_path)
-        self._camera_idx = camera_idx # change
+        
+        self._camera_ids = camera_ids # change
+        self._root_path = root_path # change
+        
         self._train_batch = train_batch_size
         self._val_batch = validation_batch_size
         self._workers = data_worker
@@ -443,7 +503,10 @@ class RealDataModule(pl.LightningDataModule):
 
         self._train_set = RealDataset(
             self._path,
-            self._camera_idx, # change
+            
+            self._camera_ids,
+            self._root_path,
+            
             frame_filter=train_split,
             tracking_results_path=self._tracking_results_path,
             tracking_resolution=self._tracking_resolution,
@@ -457,7 +520,10 @@ class RealDataModule(pl.LightningDataModule):
 
         self._val_set = RealDataset(
             self._path,
-            self._camera_idx, # change
+            
+            self._camera_ids,
+            self._root_path,
+            
             frame_filter=val_split,
             tracking_results_path=self._tracking_results_path,
             tracking_resolution=self._tracking_resolution,
@@ -506,6 +572,10 @@ class RealDataModule(pl.LightningDataModule):
         """
         parser = argparse.ArgumentParser(parents=[parser], add_help=False)
         parser.add_argument("--data_path", type=str, required=True)
+        
+        parser.add_argument("--camera_ids", required=True)
+        parser.add_argument("--root_path", required=True)        
+        
         parser.add_argument("--data_worker", type=int, default=8)
         parser.add_argument("--split_config", type=str, required=False, default=None)
         parser.add_argument("--train_batch_size", type=int, default=8, nargs=3)

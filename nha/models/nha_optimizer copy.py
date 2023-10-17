@@ -48,7 +48,6 @@ import torchvision
 import pytorch_lightning as pl
 import json
 import numpy as np
-import sys
 
 logger = get_logger(__name__)
 
@@ -63,6 +62,7 @@ class NHAOptimizer(pl.LightningModule):
         parser = ArgumentParser(parents=[parser], add_help=False)
 
         # specific arguments for combined module
+
         combi_args = [
             # texture settings
             dict(name_or_flags="--texture_hidden_feats", default=256, type=int),
@@ -124,12 +124,9 @@ class NHAOptimizer(pl.LightningModule):
 
         return parser
 
-    def __init__(self, max_frame_id, w_lap, w_silh, w_semantic_hair, body_part_weights, n_view, train_datasets, val_datasets, **kwargs):
+    def __init__(self, max_frame_id, w_lap, w_silh, w_semantic_hair, body_part_weights, **kwargs):
         super().__init__()
         self.save_hyperparameters()
-        self._n_view = n_view # change
-        self._train_datasets = train_datasets # change
-        self._val_datasets = val_datasets # change
         self.automatic_optimization = False
 
         self.callbacks = [pl.callbacks.ModelCheckpoint(filename="{epoch:02d}", save_last=True)]
@@ -156,10 +153,6 @@ class NHAOptimizer(pl.LightningModule):
         self._eyes_pose = torch.nn.Parameter(torch.zeros(max_frame_id + 1, 6), requires_grad=True)
         self._translation = torch.nn.Parameter(torch.zeros(max_frame_id + 1, 3), requires_grad=True)
         self._rotation = torch.nn.Parameter(torch.zeros(max_frame_id + 1, 3), requires_grad=True)
-        # multi view
-        self._translations = torch.nn.Parameter(torch.zeros(n_view, max_frame_id + 1, 3), requires_grad=True) # change
-        self._rotations = torch.nn.Parameter(torch.zeros(n_view, max_frame_id + 1, 3), requires_grad=True) # change
-
 
         # restrict offsets to anything but eyeballs
         body_parts = self._flame.get_body_parts()
@@ -234,8 +227,7 @@ class NHAOptimizer(pl.LightningModule):
         self.is_train = False
 
         # learning rate for flame translation
- 
-        self._trans_lr = [0.1 * i for i in self.hparams["flame_lr"]] 
+        self._trans_lr = [0.1 * i for i in self.hparams["flame_lr"]]
 
         self._semantic_thr = 0.99
         self._blurred_vertex_labels = self._flame.spatially_blurred_vert_labels
@@ -278,7 +270,7 @@ class NHAOptimizer(pl.LightningModule):
         # hard setting lr
         flame_optim, offset_optim, tex_optim, joint_flame_optim, off_resid_optim, all_resid_optim = self.optimizers()
 
-        lrs = self.get_current_lrs_n_lossweights() # lrs: dict
+        lrs = self.get_current_lrs_n_lossweights()
 
         flame_optim.param_groups[0]["lr"] = lrs["flame_lr"]
         flame_optim.param_groups[1]["lr"] = lrs["trans_lr"]
@@ -399,9 +391,6 @@ class NHAOptimizer(pl.LightningModule):
         """
 
         N = len(iter(batch.values()).__next__())
-        # 对于batch中的每一个样本，都有一个camera_idx，获取一个camera_idx的值
-        camera_idx = batch["camera_idx"][0] # change
-        
         indices = batch.get("frame", None)
 
         if indices is None:
@@ -430,8 +419,8 @@ class NHAOptimizer(pl.LightningModule):
             p["neck"] = self._neck_pose[indices]  # * torch.tensor([[0, 1., 0]], device=self.device)
             p["jaw"] = self._jaw_pose[indices]
             p["eyes"] = self._eyes_pose[indices]
-            p["rotation"] = self._rotations[camera_idx][indices] # change : self._rotation[indices]
-            p["translation"] = self._translations[camera_idx][indices] # change : self._translation[indices]
+            p["rotation"] = self._rotation[indices]
+            p["translation"] = self._translation[indices]
 
         # adding parameters from dataset
         p["shape"] = p["shape"] + batch.get("flame_shape", 0)
@@ -807,52 +796,32 @@ class NHAOptimizer(pl.LightningModule):
 
     @torch.no_grad()
     def get_dyn_cond_extrema(self, dataset=None):
-        # dataset = dataset if dataset is not None else self.trainer.train_dataloader.dataset.datasets
+        dataset = dataset if dataset is not None else self.trainer.train_dataloader.dataset.datasets
 
-        # change
-        datasets = self._train_datasets
-        # dataloader = DataLoader(dataset, batch_size=48, num_workers=4)
-        dataloaders = []
-        for dataset in datasets:
-            dataloaders.append(DataLoader(dataset, batch_size=48, num_workers=4))
-        
-        for dataloader in dataloaders:
-            expr_min, expr_max = None, None
-            pose_min, pose_max = None, None
-            mouth_conditioning_min, mouth_conditioning_max = None, None
-            
-            for i, batch in enumerate(dataloader):
+        dataloader = DataLoader(dataset, batch_size=48, num_workers=4)
 
-                batch = dict_2_device(batch, self.device)
-                flame_params_offsets = self._create_flame_param_batch(batch)
-                _, _, mc = self._forward_flame(flame_params_offsets, return_mouth_conditioning=True)
-                expr = flame_params_offsets["expr"]
-                pose = torch.cat((flame_params_offsets["rotation"], flame_params_offsets["neck"],
-                                flame_params_offsets["jaw"], flame_params_offsets["eyes"]), dim=1)
+        for i, batch in enumerate(dataloader):
+            batch = dict_2_device(batch, self.device)
+            flame_params_offsets = self._create_flame_param_batch(batch)
+            _, _, mc = self._forward_flame(flame_params_offsets, return_mouth_conditioning=True)
+            expr = flame_params_offsets["expr"]
+            pose = torch.cat((flame_params_offsets["rotation"], flame_params_offsets["neck"],
+                              flame_params_offsets["jaw"], flame_params_offsets["eyes"]), dim=1)
 
-                if i == 0:
-                    expr_min = torch.min(expr, dim=0).values
-                    expr_max = torch.max(expr, dim=0).values
-                    pose_min = torch.min(pose, dim=0).values
-                    pose_max = torch.max(pose, dim=0).values
-                    mouth_conditioning_min = torch.min(mc, dim=0).values
-                    mouth_conditioning_max = torch.max(mc, dim=0).values
-                else:
-                    # Update the min and max values
-                    expr_min = torch.min(expr_min, torch.min(expr, dim=0).values) 
-                    expr_max = torch.max(expr_max, torch.max(expr, dim=0).values)
-                    pose_min = torch.min(pose_min, torch.min(pose, dim=0).values)
-                    pose_max = torch.max(pose_max, torch.max(pose, dim=0).values)
-                    mouth_conditioning_min = torch.min(mouth_conditioning_min, torch.min(mc, dim=0).values)
-                    mouth_conditioning_max = torch.max(mouth_conditioning_max, torch.max(mc, dim=0).values)
-                
-            # Update the class attributes with the min and max values for each dataset
-            self.expr_min = expr_min if self.expr_min is None else torch.min(self.expr_min, expr_min)
-            self.expr_max = expr_max if self.expr_max is None else torch.max(self.expr_max, expr_max)
-            self.pose_min = pose_min if self.pose_min is None else torch.min(self.pose_min, pose_min)
-            self.pose_max = pose_max if self.pose_max is None else torch.max(self.pose_max, pose_max)
-            self.mouth_conditioning_min = mouth_conditioning_min if self.mouth_conditioning_min is None else torch.min(self.mouth_conditioning_min, mouth_conditioning_min)
-            self.mouth_conditioning_max = mouth_conditioning_max if self.mouth_conditioning_max is None else torch.max(self.mouth_conditioning_max, mouth_conditioning_max)
+            if i == 0:
+                self.expr_min = torch.min(expr, dim=0).values
+                self.expr_max = torch.max(expr, dim=0).values
+                self.pose_min = torch.min(pose, dim=0).values
+                self.pose_max = torch.max(pose, dim=0).values
+                self.mouth_conditioning_min = torch.min(mc, dim=0).values
+                self.mouth_conditioning_max = torch.max(mc, dim=0).values
+            else:
+                self.expr_min = torch.min(self.expr_min, torch.min(expr, dim=0).values)
+                self.expr_max = torch.max(self.expr_max, torch.max(expr, dim=0).values)
+                self.pose_min = torch.min(self.pose_min, torch.min(pose, dim=0).values)
+                self.pose_max = torch.max(self.pose_max, torch.max(pose, dim=0).values)
+                self.mouth_conditioning_min = torch.min(self.mouth_conditioning_min, torch.min(mc, dim=0).values)
+                self.mouth_conditioning_max = torch.max(self.mouth_conditioning_max, torch.max(mc, dim=0).values)
 
         return (
             (self.expr_min, self.expr_max),
@@ -1675,7 +1644,7 @@ class NHAOptimizer(pl.LightningModule):
         return total_loss, log_dict
 
     @torch.no_grad()
-    def prepare_batch(self, batches):
+    def prepare_batch(self, batch):
         """
         prepares data obtained from dataloaders before they can be processed by NHAOptimizer during training. Not
         needed at inference time. Brings fg/bg segmentation map into right format, fills gt rgb image background with
@@ -1684,13 +1653,7 @@ class NHAOptimizer(pl.LightningModule):
         :param batch: data batch as provided from dataloader of RealDataModule.train_dataloader() in real.py
         :return: data batch dict
         """
-        if(type(batches) == dict):
-            return self.prepare_single_batch(batches)
-        else:
-            for i, batch in enumerate(batches):
-                batches[i] = self.prepare_single_batch(batch)
-            return batches
-    def prepare_single_batch(self, batch):
+
         batch["seg"] = digitize_segmap(batch["seg"])
         batch["seg"] = batch["seg"].float()
         batch["rgb"] = fill_tensor_background(batch["rgb"], batch["seg"])
@@ -1719,8 +1682,8 @@ class NHAOptimizer(pl.LightningModule):
         # trust = (azi > 60) & (azi < 120) & (ele > -20) & (ele < 20)
         trust = ele_trust * azi_trust
         batch["trust_semantics"] = trust.view(-1)
-        
         return batch
+
     def toggle_optimizer(self, optimizers):
         """
         Makes sure only the gradients of the current optimizer's parameters are calculated
@@ -1746,7 +1709,7 @@ class NHAOptimizer(pl.LightningModule):
                     # If a param already appear in param_requires_grad_state, continue
                     if param in param_requires_grad_state:
                         continue
-                    param_requires_grad_state[param] = param.requires_grad # save requires_grad state
+                    param_requires_grad_state[param] = param.requires_grad
                     param.requires_grad = False
 
         # Then iterate over the current optimizer's parameters and set its `requires_grad`
@@ -1764,31 +1727,27 @@ class NHAOptimizer(pl.LightningModule):
         # save memory
         self._param_requires_grad_state = dict()
 
-    def step(self, batches, batch_idx, stage="train"):
+    def step(self, batch, batch_idx, stage="train"):
         if stage == "train" or self.fit_residuals:
             optim = self._get_current_optimizer()
 
             self.toggle_optimizer(optim)  # automatically toggle right requires_grads
-            all_losses = []
-            all_log_dicts = []
-            for batch in batches:
-                # step 1: standard optimization of flame model and offsets
-                if self.current_epoch < self.hparams["epochs_offset"]:
-                    loss, log_dict = self._optimize_offsets(batch)
+            # step 1: standard optimization of flame model and offsets
+            if self.current_epoch < self.hparams["epochs_offset"]:
+                loss, log_dict = self._optimize_offsets(batch)
 
-                # step 2: optimization texture
-                elif self.current_epoch < self.hparams["epochs_offset"] + self.hparams["epochs_texture"]:
-                    loss, log_dict = self._optimize_texture(batch)
+            # step 2: optimization texture
+            elif self.current_epoch < self.hparams["epochs_offset"] + self.hparams["epochs_texture"]:
+                loss, log_dict = self._optimize_texture(batch)
 
-                # step 3: optimization texture and shape
-                else:
-                    loss, log_dict = self._optimize_jointly(batch)
-                    
-                all_losses.append(loss)
-                all_log_dicts.append(log_dict)
+            # step 3: optimization texture and shape
+            else:
+                loss, log_dict = self._optimize_jointly(batch)
 
-            total_loss = sum(all_losses) / len(all_losses)
-            self.manual_backward(total_loss)
+            # for opt in optim:
+            #     opt.zero_grad()
+
+            self.manual_backward(loss)
 
             for opt in optim:
                 opt.step()
@@ -1799,94 +1758,55 @@ class NHAOptimizer(pl.LightningModule):
             self.untoggle_optimizer()
         else:
             with torch.no_grad():
-                all_losses = []
-                all_log_dicts = []
-                for batch in batches:
-                    if self.current_epoch < self.hparams["epochs_offset"]:
-                        loss, log_dict = self._optimize_offsets(batch)
-                    else:
-                        loss, log_dict = self._optimize_jointly(batch)
-                    all_losses.append(loss)
-                    
-        total_loss = sum(all_losses) / len(all_losses)
-        ## give all keys in logdict val_ prefix
-        # for key in list(log_dict.keys()):
-        #     val = log_dict.pop(key)
-        #     log_dict[f"{stage}_{key}"] = val
-        # change log_dict to all_log_dicts
-        for i, log_dict in enumerate(all_log_dicts):
-            for key in list(log_dict.keys()):
-                val = log_dict.pop(key)
-                log_dict[f"{stage}_{key}_{i}"] = val
-            all_log_dicts[i] = log_dict
+                if self.current_epoch < self.hparams["epochs_offset"]:
+                    loss, log_dict = self._optimize_offsets(batch)
+                else:
+                    loss, log_dict = self._optimize_jointly(batch)
 
-        ## log scores
-        # log_dict["step"] = self.current_epoch
-        # self.log_dict(log_dict, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
-        for log_dict in all_log_dicts:
-            log_dict["step"] = self.current_epoch
-            self.log_dict(log_dict, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+        # give all keys in logdict val_ prefix
+        for key in list(log_dict.keys()):
+            val = log_dict.pop(key)
+            log_dict[f"{stage}_{key}"] = val
 
-        ## log images
-        # log_images = self.current_epoch % self.hparams["image_log_period"] == 0
-        # if batch_idx == 0 and log_images:
-        #     try:
-        #         interesting_frames = [1455, 536] if stage == "train" else [826, 1399]
-        #         dataset = self.trainer.train_dataloader.dataset.datasets if stage == "train" else \
-        #             self.trainer.val_dataloaders[0].dataset
-        #         interesting_samples = [dataset[dataset.frame_list.index(f)] for f in interesting_frames]
-        #     except ValueError:
-        #         interesting_samples = [dataset[i] for i in np.linspace(0, len(dataset), 4).astype(int)[1:3]]
-        #     vis_batch = dict_2_device(stack_dicts(*interesting_samples), self.device)
-        #     vis_batch = self.prepare_batch(vis_batch)
-        #     self._visualize_head(vis_batch, max_samples=2, title=stage)
-        # change from single view to multi view
-        # 从train_dataloader中提取原始的iterable对象
+        # log scores
+        log_dict["step"] = self.current_epoch
+        self.log_dict(log_dict, prog_bar=True, on_step=False, on_epoch=True, sync_dist=True)
+
+        # log images
         log_images = self.current_epoch % self.hparams["image_log_period"] == 0
         if batch_idx == 0 and log_images:
-            all_interesting_samples = []
             try:
                 interesting_frames = [1455, 536] if stage == "train" else [826, 1399]
-                datasets = self._train_datasets if stage == "train" else self._val_datasets
-                for dataset in datasets:
-                    interesting_samples = [dataset[dataset.frame_list.index(f)] for f in interesting_frames]
-                    all_interesting_samples.append(interesting_samples)
+                dataset = self.trainer.train_dataloader.dataset.datasets if stage == "train" else \
+                    self.trainer.val_dataloaders[0].dataset
+                interesting_samples = [dataset[dataset.frame_list.index(f)] for f in interesting_frames]
             except ValueError:
-                for dataset in datasets:
-                    interesting_samples = [dataset[i] for i in np.linspace(0, len(dataset), 4).astype(int)[1:3]]
-                    all_interesting_samples.append(interesting_samples)
-            
-            for i, interesting_samples in enumerate(all_interesting_samples):
-                vis_batch = dict_2_device(stack_dicts(*interesting_samples), self.device)
-                vis_batch = self.prepare_batch(vis_batch)
-                self._visualize_head(vis_batch, max_samples=2, title=stage, idx=i)
-                # for interesting_sample in interesting_samples:
-                #     print(type(interesting_sample))
-                #     vis_batch = dict_2_device(interesting_sample, self.device)
-                #     vis_batch = self.prepare_batch(vis_batch)
-                #     self._visualize_head(vis_batch, max_samples=2, title=stage, idx=i)
+                interesting_samples = [dataset[i] for i in np.linspace(0, len(dataset), 4).astype(int)[1:3]]
+            vis_batch = dict_2_device(stack_dicts(*interesting_samples), self.device)
+            vis_batch = self.prepare_batch(vis_batch)
+            self._visualize_head(vis_batch, max_samples=2, title=stage)
 
-        return total_loss
+        return loss
 
-    def training_step(self, batches, batch_idx, optimizer_idx, *args, **kwargs):
+    def training_step(self, batch, batch_idx, optimizer_idx, *args, **kwargs):
         self.is_train = True
         self.fit_residuals = False
-        self.prepare_batch(batches)
-        ret = self.step(batches, batch_idx, stage="train")
+        self.prepare_batch(batch)
+        ret = self.step(batch, batch_idx, stage="train")
         self.is_train = False
         return ret
 
-    def validation_step(self, batches, batch_idx, **kwargs):
+    def validation_step(self, batch, batch_idx, **kwargs):
         self.fit_residuals = self.current_epoch < self.hparams["epochs_offset"] or self.current_epoch >= self.hparams[
             "epochs_texture"] + self.hparams["epochs_offset"]
-        batch = self.prepare_batch(batches)
+        batch = self.prepare_batch(batch)
 
         with torch.set_grad_enabled(self.fit_residuals):
-            self.step(batches, batch_idx, stage="val")
+            self.step(batch, batch_idx, stage="val")
         self.fit_residuals = False
 
     @torch.no_grad()
-    def _visualize_head(self, batch, max_samples=5, title=f"flame_fit", idx=0):
+    def _visualize_head(self, batch, max_samples=5, title=f"flame_fit"):
         rgba_pred = self.forward(batch, symmetric_rgb_range=False)
         shaded_pred = self.predict_shaded_mesh(batch)
 
@@ -1899,7 +1819,7 @@ class NHAOptimizer(pl.LightningModule):
 
         images = torch.cat([rgb_gt, rgb_pred, shaded_pred], dim=0)
         log_img = torchvision.utils.make_grid(images, nrow=N)
-        self.logger.experiment.add_image(title + "prediction" + str(idx), log_img, self.current_epoch)
+        self.logger.experiment.add_image(title + "prediction", log_img, self.current_epoch)
 
     def forward(self, batch, ignore_expr=False, ignore_pose=False, center_prediction=False, symmetric_rgb_range=True):
         """
@@ -1985,25 +1905,14 @@ class NHAOptimizer(pl.LightningModule):
             textures=tex,
         )
         
+        output_path = "/bufferhdd/zhanglibo/project/neural-head-avatars/mesh"
+        vertices = mesh.verts_packed().cpu().numpy()
+        faces = mesh.faces_packed().cpu().numpy()
+        textures = mesh.textures.verts_rgb_packed().cpu().numpy()
+        save_obj(output_path, mesh)
+        
         return render_shaded_mesh(mesh, K, RT, (H, W), self.device, light_colors)
 
-    # change
-    def get_mesh(self, batch, output_path):
-
-        flame_params_offsets = self._create_flame_param_batch(batch)
-        offsets_verts, _ = self._forward_flame(flame_params_offsets)
-
-        vertex_colors = torch.ones_like(offsets_verts) * torch.tensor((188, 204, 245), device=self.device).float().view(1, 3)
-        # define meshes and textures
-        tex = TexturesVertex(vertex_colors)
-        mesh = Meshes(
-            verts=offsets_verts,
-            faces=self._flame.faces[None].expand(len(offsets_verts), -1, -1),
-            textures=tex,
-        )
-
-        save_obj(output_path, mesh.verts_packed(), mesh.faces_packed())
-    
     def get_current_lrs_n_lossweights(self):
         epoch = self.current_epoch
 
@@ -2043,14 +1952,14 @@ class NHAOptimizer(pl.LightningModule):
     def configure_optimizers(self):
 
         # FLAME
-        flame_params = [self._shape, self._expr, self._rotations, self._jaw_pose, self._neck_pose] # change : rotation -> rotations
+        flame_params = [self._shape, self._expr, self._rotation, self._jaw_pose, self._neck_pose]
 
         lrs = self.get_current_lrs_n_lossweights()
 
         # translation gets smaller learning rate
         params = [
             {"params": flame_params},
-            {"params": [self._translations], "lr": lrs["trans_lr"]}, # change : translation -> translations
+            {"params": [self._translation], "lr": lrs["trans_lr"]},
         ]
         flame_optim = torch.optim.SGD(params, lr=lrs["flame_lr"])
 
@@ -2071,21 +1980,21 @@ class NHAOptimizer(pl.LightningModule):
         # translation gets smaller lr
         params = [
             {"params": joint_flame_params},
-            {"params": [self._translations], "lr": lrs["trans_lr"]},
+            {"params": [self._translation], "lr": lrs["trans_lr"]},
         ]
         joint_flame_optim = torch.optim.SGD(params, lr=lrs["flame_lr"])
 
         # RESIDUALS optimizer
-        resid_params = [self._expr, self._rotations, self._jaw_pose, self._neck_pose]
+        resid_params = [self._expr, self._rotation, self._jaw_pose, self._neck_pose]
         params = [
             {"params": resid_params},
-            {"params": [self._translations], "lr": lrs["trans_lr"]},
+            {"params": [self._translation], "lr": lrs["trans_lr"]},
         ]
         offset_resid_optim = torch.optim.SGD(params, lr=lrs["flame_lr"])
 
         params = [
             {"params": resid_params + [self._eyes_pose]},
-            {"params": [self._translations], "lr": lrs["trans_lr"]},
+            {"params": [self._translation], "lr": lrs["trans_lr"]},
         ]
         all_resid_optim = torch.optim.SGD(params, lr=lrs["flame_lr"])  # adds eye rotations
 

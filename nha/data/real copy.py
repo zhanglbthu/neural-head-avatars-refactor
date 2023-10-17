@@ -68,7 +68,6 @@ class RealDataset(Dataset):
     def __init__(
         self,
         path,
-        camera_idx=0, # change
         frame_filter=None,
         tracking_results_path=None,
         tracking_resolution=None,
@@ -108,7 +107,6 @@ class RealDataset(Dataset):
         """
         super().__init__()
         self._path = Path(path)
-        self._camera_idx = camera_idx # change
         self._has_lmks = load_lmk
         self._has_flame = load_flame
         self._has_camera = load_camera
@@ -249,9 +247,6 @@ class RealDataset(Dataset):
         sample["frame"] = frame2id(frame_path.name) # e.g. 0000
         subject = frame_path.parent.name
         sample["subject"] = subject
-        
-        # 获取camera_idx
-        sample["camera_idx"] = self._camera_idx # change
 
         rgba = ttf.to_tensor(Image.open(view).convert("RGBA"))
         sample["rgb"] = (rgba[:3] - 0.5) / 0.5
@@ -304,8 +299,7 @@ class RealDataset(Dataset):
             sample["flame_pose"] = torch.from_numpy(
                 np.concatenate(
                     [
-                        # tr["rotation"][j],
-                        tr["rotations"][self._camera_idx][j], # change
+                        tr["rotation"][j],
                         tr["neck_pose"][j],
                         tr["jaw_pose"][j],
                         tr["eyes_pose"][j],
@@ -313,8 +307,7 @@ class RealDataset(Dataset):
                     axis=0,
                 )
             ).float()
-            # sample["flame_trans"] = torch.from_numpy(tr["translation"][j]).float()
-            sample["flame_trans"] = torch.from_numpy(tr["translations"][self._camera_idx][j]).float()
+            sample["flame_trans"] = torch.from_numpy(tr["translation"][j]).float()
 
         # camera
         if self._has_camera:
@@ -327,19 +320,17 @@ class RealDataset(Dataset):
             fy_scale = max(track_h, track_w) * img_h / track_h
             cx_scale = img_w
             cy_scale = img_h
-            if len(tr["K"][self._camera_idx].shape) == 1:
+            if len(tr["K"].shape) == 1:
                 sample["cam_intrinsic"] = create_intrinsics_matrix(
-                    fx=tr["K"][self._camera_idx][0] * fx_scale,
-                    fy=tr["K"][self._camera_idx][0] * fy_scale,
-                    px=tr["K"][self._camera_idx][1] * cx_scale,
-                    py=tr["K"][self._camera_idx][2] * cy_scale,
+                    fx=tr["K"][0] * fx_scale,
+                    fy=tr["K"][0] * fy_scale,
+                    px=tr["K"][1] * cx_scale,
+                    py=tr["K"][2] * cy_scale,
                 )
             else:
-                assert tr["K"][self._camera_idx].shape[0] == 3 and tr["K"][self._camera_idx].shape[1] == 3
-                # sample["cam_intrinsic"] = torch.from_numpy(tr["K"]).float()
-                sample["cam_intrinsic"] = torch.from_numpy(tr["K"][self._camera_idx]).float() # change
-            # sample["cam_extrinsic"] = torch.from_numpy(tr["RT"]).float()
-            sample["cam_extrinsic"] = torch.from_numpy(tr["RT"][self._camera_idx]).float() # change
+                assert tr["K"].shape[0] == 3 and tr["K"].shape[1] == 3
+                sample["cam_intrinsic"] = torch.from_numpy(tr["K"]).float()
+            sample["cam_extrinsic"] = torch.from_numpy(tr["RT"]).float()
 
         if self._has_light:
             tr = self._tracking_results
@@ -381,7 +372,6 @@ class RealDataModule(pl.LightningDataModule):
     def __init__(
         self,
         data_path,
-        camera_idx, # change
         split_config=None,
         tracking_results_path=None,
         tracking_resolution=None,
@@ -416,7 +406,6 @@ class RealDataModule(pl.LightningDataModule):
         """
         super().__init__()
         self._path = Path(data_path)
-        self._camera_idx = camera_idx # change
         self._train_batch = train_batch_size
         self._val_batch = validation_batch_size
         self._workers = data_worker
@@ -443,7 +432,6 @@ class RealDataModule(pl.LightningDataModule):
 
         self._train_set = RealDataset(
             self._path,
-            self._camera_idx, # change
             frame_filter=train_split,
             tracking_results_path=self._tracking_results_path,
             tracking_resolution=self._tracking_resolution,
@@ -457,7 +445,6 @@ class RealDataModule(pl.LightningDataModule):
 
         self._val_set = RealDataset(
             self._path,
-            self._camera_idx, # change
             frame_filter=val_split,
             tracking_results_path=self._tracking_results_path,
             tracking_resolution=self._tracking_resolution,

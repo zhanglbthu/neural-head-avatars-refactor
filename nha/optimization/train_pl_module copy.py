@@ -15,7 +15,6 @@ import torch
 from argparse import ArgumentParser
 from pytorch_lightning.loggers import TensorBoardLogger
 from configargparse import ArgumentParser as ConfigArgumentParser
-from pytorch_lightning.trainer.supporters import CombinedLoader
 
 from nha.evaluation.visualizations import generate_novel_view_folder, reconstruct_sequence
 
@@ -53,20 +52,16 @@ def train_pl_module(optimizer_module, data_module, args=None):
 
     args_dict['camera_idx'] = 0
     args_dict['data_path'] = data_root + '/' + str(camera_list[0])[-2:]
-    
-    data_paths = []
-    for i in range(len(camera_list)):
-        data_paths.append(data_root + '/' + str(camera_list[i])[-2:])
-    args_dict['data_paths'] = data_paths
+    print(args_dict['data_path'])
     
     # init data # change
     data_list = []
     for i in range(len(camera_list)):
         args_dict['camera_idx'] = i
-        args_dict['data_path'] = data_paths[i]
+        # args_dict['data_path'] = data_root + '/' + str(camera_list[i])[-2:]
         data_list.append(data_module(**args_dict))
         data_list[i].setup()
-    
+        
     data = data_list[0]
     
     # init datamodule
@@ -82,17 +77,7 @@ def train_pl_module(optimizer_module, data_module, args=None):
 
     # init optimizer
     args_dict['max_frame_id'] = data.max_frame_id
-    args_dict['n_view'] = len(camera_list)
-    
-    train_datasets = []
-    val_datasets = []
-    for i in range(len(camera_list)):
-        train_datasets.append(data_list[i]._train_set)
-        val_datasets.append(data_list[i]._val_set)
-        
-    args_dict['train_datasets'] = train_datasets
-    args_dict['val_datasets'] = val_datasets
-    
+
     if args.checkpoint_file:
         model = optimizer_module.load_from_checkpoint(args.checkpoint_file, strict=True, **args_dict)
     else:
@@ -106,9 +91,6 @@ def train_pl_module(optimizer_module, data_module, args=None):
                                           name="lightning_logs")
     log_dir = Path(experiment_logger.log_dir)
 
-    # print length of dataloaders
-    print("data_list length: ", len(data_list))
-
     for i, stage in enumerate(stages):
         current_epoch = torch.load(args_dict["checkpoint_file"])["epoch"] if args_dict["checkpoint_file"] else 0
         if current_epoch < stage_jumps[i]:
@@ -120,22 +102,10 @@ def train_pl_module(optimizer_module, data_module, args=None):
                                                     max_epochs=stage_jumps[i],
                                                     logger=experiment_logger)
 
-            # combine data loaders
-            train_dataloader = CombinedLoader([data.train_dataloader(batch_size=data._train_batch[i]) for data in data_list])
-            val_dataloader = CombinedLoader([data.val_dataloader(batch_size=data._val_batch[i]) for data in data_list])
-            # train_dataloader = []
-            # val_dataloader = []
-            # for data in data_list:
-            #     train_dataloader.append(data.train_dataloader(batch_size=data._train_batch[i]))
-            #     val_dataloader.append(data.val_dataloader(batch_size=data._val_batch[i]))
-            
             # training
-            # trainer.fit(model,
-            #             train_dataloader=data.train_dataloader(batch_size=data._train_batch[i]),
-            #             val_dataloaders=data.val_dataloader(batch_size=data._val_batch[i]))
             trainer.fit(model,
-                        train_dataloader=train_dataloader,
-                        val_dataloaders=val_dataloader)
+                        train_dataloader=data.train_dataloader(batch_size=data._train_batch[i]),
+                        val_dataloaders=data.val_dataloader(batch_size=data._val_batch[i]))
 
             ckpt_path = Path(trainer.log_dir) / "checkpoints" / (stage + "_optim.ckpt")
             trainer.save_checkpoint(ckpt_path)
@@ -143,46 +113,46 @@ def train_pl_module(optimizer_module, data_module, args=None):
             args_dict["checkpoint_file"] = ckpt_path
 
     # visualizations and evaluations
-    # proc_id = int(os.environ.get("SLURM_PROCID", 0))
-    # if proc_id == 0:
-    #     model_name = log_dir.name
-    #     logger.info("Producing Visualizations")
-    #     vis_path = log_dir / "NovelViewSynthesisResults"
-    #     model = optimizer_module.load_from_checkpoint(args_dict["checkpoint_file"],
-    #                                                   strict=True, **args_dict).eval().cuda()
-    #     generate_novel_view_folder(model, data, angles=[[0, 0], [-30, 0], [-60, 0]],
-    #                                outdir=vis_path, center_novel_views=True)
-    #     # os.system("module load FFmpeg")
-    #     os.system(
-    #         f"for split in train val; do for angle in 0_0 -30_0 -60_0; do ffmpeg -pattern_type glob -i {vis_path}/$split/$angle/'*.png' {vis_path}/{vis_path.parent.name}-$split-$angle.mp4;done;done")
+    proc_id = int(os.environ.get("SLURM_PROCID", 0))
+    if proc_id == 0:
+        model_name = log_dir.name
+        logger.info("Producing Visualizations")
+        vis_path = log_dir / "NovelViewSynthesisResults"
+        model = optimizer_module.load_from_checkpoint(args_dict["checkpoint_file"],
+                                                      strict=True, **args_dict).eval().cuda()
+        generate_novel_view_folder(model, data, angles=[[0, 0], [-30, 0], [-60, 0]],
+                                   outdir=vis_path, center_novel_views=True)
+        # os.system("module load FFmpeg")
+        os.system(
+            f"for split in train val; do for angle in 0_0 -30_0 -60_0; do ffmpeg -pattern_type glob -i {vis_path}/$split/$angle/'*.png' {vis_path}/{vis_path.parent.name}-$split-$angle.mp4;done;done")
 
-    #     # freeing up space
-    #     try:
-    #         del trainer
-    #     except Exception:
-    #         pass
-    #     try:
-    #         del model
-    #     except Exception:
-    #         pass
+        # freeing up space
+        try:
+            del trainer
+        except Exception:
+            pass
+        try:
+            del model
+        except Exception:
+            pass
 
         # quantitative evaluation of val dataset
-        # bs = max(args_dict["validation_batch_size"])
-        # dataloader = DataLoader(data._val_set, batch_size=bs,
-        #                         num_workers=bs, shuffle=False)
-        # model_dict = {model_name: args_dict["checkpoint_file"]}
-        # model_dict = OrderedDict(model_dict)
-        # eval_path = log_dir / f"QuantitativeEvaluation-{model_name}.json"
+        bs = max(args_dict["validation_batch_size"])
+        dataloader = DataLoader(data._val_set, batch_size=bs,
+                                num_workers=bs, shuffle=False)
+        model_dict = {model_name: args_dict["checkpoint_file"]}
+        model_dict = OrderedDict(model_dict)
+        eval_path = log_dir / f"QuantitativeEvaluation-{model_name}.json"
 
-        # eval_dict = evaluate_models(models=model_dict, dataloader=dataloader)
-        # with open(eval_path, "w") as f:
-        #     json.dump(eval_dict, f)
+        eval_dict = evaluate_models(models=model_dict, dataloader=dataloader)
+        with open(eval_path, "w") as f:
+            json.dump(eval_dict, f)
 
         # scene reconstruction
-        # reconstruct_sequence(model_dict, dataset=data._val_set, batch_size=bs,
-        #                      savepath=str(log_dir / f"SceneReconstruction{model_name}-val.mp4"))
-        # reconstruct_sequence(model_dict, dataset=data._train_set, batch_size=bs,
-        #                      savepath=str(log_dir / f"SceneReconstruction-{model_name}-train.mp4"))
+        reconstruct_sequence(model_dict, dataset=data._val_set, batch_size=bs,
+                             savepath=str(log_dir / f"SceneReconstruction{model_name}-val.mp4"))
+        reconstruct_sequence(model_dict, dataset=data._train_set, batch_size=bs,
+                             savepath=str(log_dir / f"SceneReconstruction-{model_name}-train.mp4"))
 
 # change
 def read_camera_and_data_root(file_path):
