@@ -143,28 +143,28 @@ def train_pl_module(optimizer_module, data_module, args=None):
             args_dict["checkpoint_file"] = ckpt_path
 
     # visualizations and evaluations
-    # proc_id = int(os.environ.get("SLURM_PROCID", 0))
-    # if proc_id == 0:
-    #     model_name = log_dir.name
-    #     logger.info("Producing Visualizations")
-    #     vis_path = log_dir / "NovelViewSynthesisResults"
-    #     model = optimizer_module.load_from_checkpoint(args_dict["checkpoint_file"],
-    #                                                   strict=True, **args_dict).eval().cuda()
-    #     generate_novel_view_folder(model, data, angles=[[0, 0], [-30, 0], [-60, 0]],
-    #                                outdir=vis_path, center_novel_views=True)
-    #     # os.system("module load FFmpeg")
-    #     os.system(
-    #         f"for split in train val; do for angle in 0_0 -30_0 -60_0; do ffmpeg -pattern_type glob -i {vis_path}/$split/$angle/'*.png' {vis_path}/{vis_path.parent.name}-$split-$angle.mp4;done;done")
+    proc_id = int(os.environ.get("SLURM_PROCID", 0))
+    if proc_id == 0:
+        model_name = log_dir.name
+        logger.info("Producing Visualizations")
+        vis_path = log_dir / "NovelViewSynthesisResults"
+        model = optimizer_module.load_from_checkpoint(args_dict["checkpoint_file"],
+                                                      strict=True, **args_dict).eval().cuda()
+        generate_novel_view_folder(model, data, angles=[[0, 0], [-30, 0], [-60, 0]],
+                                   outdir=vis_path, center_novel_views=True)
+        # os.system("module load FFmpeg")
+        os.system(
+            f"for split in train val; do for angle in 0_0 -30_0 -60_0; do ffmpeg -pattern_type glob -i {vis_path}/$split/$angle/'*.png' {vis_path}/{vis_path.parent.name}-$split-$angle.mp4;done;done")
 
-    #     # freeing up space
-    #     try:
-    #         del trainer
-    #     except Exception:
-    #         pass
-    #     try:
-    #         del model
-    #     except Exception:
-    #         pass
+        # freeing up space
+        try:
+            del trainer
+        except Exception:
+            pass
+        try:
+            del model
+        except Exception:
+            pass
 
         # quantitative evaluation of val dataset
         # bs = max(args_dict["validation_batch_size"])

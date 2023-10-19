@@ -122,8 +122,7 @@ def reconstruct_sequence(models,
         anim.save(savepath, progress_callback=callback)
     logger.info("Finished Animation")
     return anim
-
-
+    
 @torch.no_grad()
 def generate_novel_view_folder(model: NHAOptimizer,
                                data_module: RealDataModule,
@@ -186,6 +185,25 @@ def generate_novel_view_folder(model: NHAOptimizer,
                     center_pred = center_novel_views and (az != 0 or el != 0)  # front view is never recentered
                     pred_imgs = model.forward(batch, center_prediction=center_pred, symmetric_rgb_range=False)
 
+                    # change: save mesh to .obj
+                    if az == 0 and el == 0:
+                        root_path = "/root/autodl-tmp/mesh/metaface/nha/08"
+
+                        batch_size = pred_imgs.shape[0]
+                        for i in range(batch_size):
+                            sample = dict(
+                                        flame_shape = batch["flame_shape"][i][None],
+                                        flame_expr = batch["flame_expr"][i][None],
+                                        flame_pose = batch["flame_pose"][i][None],
+                                        flame_trans = batch["flame_trans"][i][None],
+                                        cam_intrinsic=batch["cam_intrinsic"][i][None],
+                                        cam_extrinsic=batch["cam_extrinsic"][i][None],
+                                        rgb=batch["rgb"][i][None],
+                                        camera_idx=batch["camera_idx"][i][None],)
+                            sample = dict_2_device(sample, model.device)
+                            mesh_path = root_path + f"/{batch['frame'][i].item():04d}.obj"
+                            model.get_mesh(sample, mesh_path)
+                            
                     for img, frame in zip(pred_imgs, batch["frame"]):
                         f_outpath = angledir / f"{frame.item():04d}.png"
                         topil(img.detach().cpu()).save(f_outpath)
