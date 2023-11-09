@@ -133,6 +133,7 @@ def train_pl_module(optimizer_module, data_module, args=None):
             # trainer.fit(model,
             #             train_dataloader=data.train_dataloader(batch_size=data._train_batch[i]),
             #             val_dataloaders=data.val_dataloader(batch_size=data._val_batch[i]))
+            # change
             trainer.fit(model,
                         train_dataloader=train_dataloader,
                         val_dataloaders=val_dataloader)

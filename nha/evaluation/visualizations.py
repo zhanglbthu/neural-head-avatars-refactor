@@ -187,7 +187,9 @@ def generate_novel_view_folder(model: NHAOptimizer,
 
                     # change: save mesh to .obj
                     if az == 0 and el == 0:
-                        root_path = "/root/autodl-tmp/mesh/metaface/nha/08"
+                        root_path = "/root/autodl-tmp/mesh/nha/test"
+                        if not os.path.exists(root_path):
+                            os.makedirs(root_path)
 
                         batch_size = pred_imgs.shape[0]
                         for i in range(batch_size):

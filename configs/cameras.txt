@@ -1,5 +1,5 @@
-400009
-400023
-400018
-400042
-/root/autodl-tmp/data/metaface/nha/08
+222200042
+221501007
+220700191
+222200049
+/root/autodl-tmp/data/organize_nersemble/nha

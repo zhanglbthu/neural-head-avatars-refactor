@@ -447,6 +447,10 @@ class NHAOptimizer(pl.LightningModule):
         else:
             p["offsets"] = self._predict_offsets(p["neck"])
 
+        # 将p中的所有参数均置为0
+        # for k in p.keys():
+        #     p[k] = torch.zeros_like(p[k])
+
         return p
 
     def _forward_flame(self, flame_params, return_mouth_conditioning=False):
@@ -1991,7 +1995,9 @@ class NHAOptimizer(pl.LightningModule):
     def get_mesh(self, batch, output_path):
 
         flame_params_offsets = self._create_flame_param_batch(batch)
+        
         offsets_verts, _ = self._forward_flame(flame_params_offsets)
+        
 
         vertex_colors = torch.ones_like(offsets_verts) * torch.tensor((188, 204, 245), device=self.device).float().view(1, 3)
         # define meshes and textures

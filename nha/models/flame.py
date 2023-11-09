@@ -436,6 +436,7 @@ class FlameHead(nn.Module):
                              uvs=self._vertex_uvs.cpu().numpy(),
                              faces=self._faces[face_idcs].cpu().numpy(),
                              uvfaces=self._faces_uvs[face_idcs].cpu().numpy())
+        torch.save((verts, uvs, faces, uv_faces, edges, uv_edges), "test.pt")
         faces = torch.cat((self._faces, torch.tensor(faces[len(face_idcs):],
                                                      dtype=self._faces.dtype,
                                                      device=self._faces.device)), dim=0)

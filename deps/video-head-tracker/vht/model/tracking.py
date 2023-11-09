@@ -183,8 +183,8 @@ class FlameTracker:
         # camera definition
         if not self._calibrated:
             # K contains focal length and principle point
-            self._K = torch.zeros(3).to(device)
-            self._RT = torch.eye(3, 4).to(device)
+            self._K = torch.zeros(n_view, 3, 3).to(device)
+            self._RT = torch.zeros(n_view, 3, 4).to(device)
             train_tensors += [self._K]
         else:
             # K and RT are fixed, init n_view cameras
@@ -295,8 +295,8 @@ class FlameTracker:
                 with torch.no_grad():
                     self._initialize_frame(frame_idx, camera_idx)
                 samples.append(self._get_current_frame(frame_idx, is_init_frame, camera_idx))
-                self._K[camera_idx] = samples[camera_idx]["cam_intrinsic"]
-                self._RT[camera_idx] = samples[camera_idx]["cam_extrinsic"]
+                self._K[camera_idx] = samples[camera_idx]["cam_intrinsic"][0]
+                self._RT[camera_idx] = samples[camera_idx]["cam_extrinsic"][0]
                     
             train_params = self._get_train_parameters(frame_idx, is_init_frame)
             optimizer = self._configure_optimizer(train_params, is_init_frame, is_cam=False)
@@ -323,13 +323,13 @@ class FlameTracker:
                     self._clear_cache()
                     
                     # log K
-                    if not self._calibrated:
-                        global_step = self._global_step(frame_idx, step_i, camera_idx)
-                        self._logger.add_scalar(
-                            "camera/focal_length", self._K[0], global_step
-                        )
-                        self._logger.add_scalar("camera/cx", self._K[1], global_step)
-                        self._logger.add_scalar("camera/cy", self._K[2], global_step)
+                    # if not self._calibrated:
+                    #     global_step = self._global_step(frame_idx, step_i, camera_idx)
+                    #     self._logger.add_scalar(
+                    #         "camera/focal_length", self._K[0], global_step
+                    #     )
+                    #     self._logger.add_scalar("camera/cx", self._K[1], global_step)
+                    #     self._logger.add_scalar("camera/cy", self._K[2], global_step)
                     
                     for _ in range(self._config["sub_steps"]):
                         self._fill_cam_params_into_sample(sample)
@@ -515,6 +515,8 @@ class FlameTracker:
             "translation": [],
             "rotation": [],
         }
+        if include_keyframes:
+            indices += self._config["keyframes"]
         for idx in indices:
             params["translation"].append(self._translations[camera_idx][idx])
             params["rotation"].append(self._rotations[camera_idx][idx])
@@ -575,6 +577,21 @@ class FlameTracker:
             self._initialize_from_previous(frame_idx, camera_idx)
         else:
             self._initialize_from_calibration(frame_idx, camera_idx)
+        # if frame_idx > 0:
+        #     self._initialize_from_previous(frame_idx, camera_idx)
+        # if frame_idx < 60:
+        #     self._initialize_from_calibration(frame_idx, camera_idx)
+        # else:
+        #     self._initialize_camera(frame_idx, camera_idx)
+        # if frame_idx % 10 == 0:
+        #     self._initialize_from_calibration(frame_idx, camera_idx)
+        # else:
+        #     self._initialize_camera(frame_idx, camera_idx)
+        # 如果frame_idx不在keyframes中，那么就初始化为上一帧的参数
+        if frame_idx not in self._config["keyframes"]:
+            print("initialize from previous frame at frame {}".format(frame_idx))
+            self._initialize_camera(frame_idx, camera_idx)
+            
 
     def _initialize_from_previous(self, frame_idx, camera_idx):
         """
@@ -593,6 +610,17 @@ class FlameTracker:
         ]:
             param[frame_idx].data = param[frame_idx - 1].detach().clone().data
             
+        # for param in [self._translations, self._rotations]:
+        #     param[camera_idx][frame_idx].data = param[camera_idx][frame_idx - 1].detach().clone().data
+
+    def _initialize_camera(self, frame_idx, camera_idx):
+        """
+        Initializes camera parameters of frame frame_idx
+        :param frame_idx:
+        :return:
+        """
+        if frame_idx == 0:
+            return
         for param in [self._translations, self._rotations]:
             param[camera_idx][frame_idx].data = param[camera_idx][frame_idx - 1].detach().clone().data
 
@@ -606,7 +634,7 @@ class FlameTracker:
 
         device = self._device
         sample = self._get_current_frame(frame_idx, include_keyframes=True, camera_idx=camera_idx)
-        assert frame_idx == sample["frame_index"][0] == 0
+        # assert frame_idx == sample["frame_index"][0] == 0
 
         # get image resolution
         img_h, img_w = sample["rgb"].shape[2:]
@@ -696,7 +724,12 @@ class FlameTracker:
                 t = new_t
                 
                 if t[[2]] < 0:
-                    print("t[2] < 0")
+                    print("t[2] < 0 at frame {}".format(frame_i))
+                    # self._initialize_camera(frame_idx, camera_idx)
+                    # print("initialize camera from previous frame at frame {}".format(frame_idx))
+                    # return
+                    
+                    
                     t *= -1
                     r = flip_xy * R.from_rotvec(r)
                     r = r.as_rotvec() 
@@ -880,7 +913,7 @@ class FlameTracker:
         screen_colors = F.grid_sample(gt_rgb, screen_coords)
 
         photo_loss = (predicted_images - screen_colors)[mask].abs()
-        assert mask.sum() > 0
+
         return photo_loss.sum() / mask.sum()
 
     def _compute_regularization_energy(self, frame_idx, include_keyframes):
