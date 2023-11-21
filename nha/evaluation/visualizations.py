@@ -187,7 +187,7 @@ def generate_novel_view_folder(model: NHAOptimizer,
 
                     # change: save mesh to .obj
                     if az == 0 and el == 0:
-                        root_path = "/root/autodl-tmp/mesh/nha/test"
+                        root_path = "/root/autodl-tmp/mesh/nha/shout"
                         if not os.path.exists(root_path):
                             os.makedirs(root_path)
 
