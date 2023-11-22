@@ -377,7 +377,7 @@ class NHAOptimizer(pl.LightningModule):
         return final_offsets
 
     def _create_flame_param_batch(self, batch, ignore_shape=False, ignore_expr=False, ignore_pose=False,
-                                  ignore_offsets=False):
+                                  ignore_offsets=False, single_view=False):
         """
         adds residual para
         :param batch:
@@ -400,7 +400,9 @@ class NHAOptimizer(pl.LightningModule):
 
         N = len(iter(batch.values()).__next__())
         # 对于batch中的每一个样本，都有一个camera_idx，获取一个camera_idx的值
-        camera_idx = batch["camera_idx"][0] # change
+        if not single_view:
+            # 如果batch包含camera_idx，则获取camera_idx的值，否则camera_idx为0
+            camera_idx = batch["camera_idx"][0] if "camera_idx" in batch else 0
         
         indices = batch.get("frame", None)
 
@@ -430,8 +432,12 @@ class NHAOptimizer(pl.LightningModule):
             p["neck"] = self._neck_pose[indices]  # * torch.tensor([[0, 1., 0]], device=self.device)
             p["jaw"] = self._jaw_pose[indices]
             p["eyes"] = self._eyes_pose[indices]
-            p["rotation"] = self._rotations[camera_idx][indices] # change : self._rotation[indices]
-            p["translation"] = self._translations[camera_idx][indices] # change : self._translation[indices]
+            if single_view:
+                p["rotation"] = self._rotation[indices]
+                p["translation"] = self._translation[indices]
+            else:
+                p["rotation"] = self._rotations[camera_idx][indices] # change : self._rotation[indices]
+                p["translation"] = self._translations[camera_idx][indices] # change : self._translation[indices]
 
         # adding parameters from dataset
         p["shape"] = p["shape"] + batch.get("flame_shape", 0)
@@ -1934,7 +1940,7 @@ class NHAOptimizer(pl.LightningModule):
         return rgba_pred
 
     @torch.no_grad()
-    def predict_reenaction(self, batch, driving_model, base_target_params, base_driving_params, return_alpha=False):
+    def predict_reenaction(self, batch, driving_model, base_target_params=None, base_driving_params=None, return_alpha=False):
 
         K = batch["cam_intrinsic"]
         RT = batch["cam_extrinsic"]
@@ -1944,15 +1950,34 @@ class NHAOptimizer(pl.LightningModule):
         flame_params_offsets = self._create_flame_param_batch(batch)
 
         # insert correct shape parameters
-        flame_params_offsets["shape"] = base_target_params["shape"].expand(N, -1)
+        # flame_params_offsets["shape"] = base_target_params["shape"].expand(N, -1)
 
         # adopt driving frame parameters
         flame_params_driving = driving_model._create_flame_param_batch(batch)
         for key in ["expr", "translation", "rotation", "neck", "jaw", "eyes"]:
-            residual_param = flame_params_driving[key] - base_driving_params[key].expand(N, -1)
-            flame_params_offsets[key] = base_target_params[key].expand(N, -1) + residual_param
+            # residual_param = flame_params_driving[key] - base_driving_params[key].expand(N, -1)
+            # flame_params_offsets[key] = base_target_params[key].expand(N, -1) + residual_param
+            flame_params_offsets[key] = flame_params_driving[key]
 
         offsets_verts, _, mouth_conditioning = self._forward_flame(flame_params_offsets, return_mouth_conditioning=True)
+        
+        # # save mesh
+        root_path = '/root/autodl-tmp/retarget/mesh/test_new'
+        # 创建路径
+        import os
+        if not os.path.exists(root_path):
+            os.makedirs(root_path)
+        for frame_idx, offsets_vert in zip(batch["frame"], offsets_verts):
+            # 在offsets_vert的第0列增加一个维度：[N, 3] -> [1, N, 3]
+            offsets_vert = offsets_vert.unsqueeze(0)
+
+            output_mesh = root_path + f"/{frame_idx}.obj"
+            mesh = Meshes(
+                verts=offsets_vert,
+                faces=self._flame.faces[None].expand(len(offsets_vert), -1, -1),
+            )
+
+            save_obj(output_mesh, mesh.verts_packed(), mesh.faces_packed())
 
         # rgba prediction
         expr = flame_params_offsets["expr"]

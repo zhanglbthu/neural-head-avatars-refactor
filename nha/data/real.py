@@ -563,7 +563,7 @@ def digitize_segmap(segmap, neglect=["clothes"]):
     return segmap
 
 
-def tracking_results_2_data_batch(tr: dict, idcs: list):
+def tracking_results_2_data_batch(tr: dict, idcs: list, single_view=False, camera_idx=0):
     """
     transforms tracking results entries to batch that can be processed be NHAOptimizer.forward()
 
@@ -582,31 +582,56 @@ def tracking_results_2_data_batch(tr: dict, idcs: list):
     cx_scale = img_w
     cy_scale = img_h
 
-    cam_intrinsics = create_intrinsics_matrix(
-        fx=tr["K"][0] * f_scale,
-        fy=tr["K"][0] * f_scale,
-        px=tr["K"][1] * cx_scale,
-        py=tr["K"][2] * cy_scale,
-    )
+    if single_view:
+        cam_intrinsics = create_intrinsics_matrix(
+            fx=tr["K"][0] * f_scale,
+            fy=tr["K"][0] * f_scale,
+            px=tr["K"][1] * cx_scale,
+            py=tr["K"][2] * cy_scale,
+        )
+        
+        pose = np.concatenate(
+            [
+                tr["rotation"],
+                tr["neck_pose"],
+                tr["jaw_pose"],
+                tr["eyes_pose"],
+            ],
+            axis=1,
+        )
+        
+    else:
+        # changep
+        # print("camera_idx: ", camera_idx)
+        # print("tr['K']: ", tr["K"])
+        # cam_intrinsics = create_intrinsics_matrix(
+        #     fx=tr["K"][camera_idx][0] * f_scale,
+        #     fy=tr["K"][camera_idx][0] * f_scale,
+        #     px=tr["K"][camera_idx][1] * cx_scale,
+        #     py=tr["K"][camera_idx][2] * cy_scale,
+        # )
+        cam_intrinsics = torch.from_numpy(tr["K"][camera_idx]).float()
 
 
-    pose = np.concatenate(
-        [
-            tr["rotation"],
-            tr["neck_pose"],
-            tr["jaw_pose"],
-            tr["eyes_pose"],
-        ],
-        axis=1,
-    )
+        pose = np.concatenate(
+            [
+                tr["rotations"][camera_idx],
+                tr["neck_pose"],
+                tr["jaw_pose"],
+                tr["eyes_pose"],
+            ],
+            axis=1,
+        )
 
     batch = dict(
+        # frame_idx=torch.from_numpy(tr["frame"][tr_idcs]).long(), # change
         flame_shape=torch.from_numpy(tr["shape"][None]).float().expand(N, -1),
         flame_expr=torch.from_numpy(tr["expr"][tr_idcs]).float(),
         flame_pose=torch.from_numpy(pose[tr_idcs]).float(),
-        flame_trans=torch.from_numpy(tr["translation"][tr_idcs]).float(),
+        # flame_trans=torch.from_numpy(tr["translation"][tr_idcs]).float(),
+        flame_trans=torch.from_numpy(tr["translations"][camera_idx][tr_idcs]).float() if not single_view else torch.from_numpy(tr["translation"][tr_idcs]).float(),
         cam_intrinsic=cam_intrinsics[None].expand(N, -1, -1),
-        cam_extrinsic=torch.from_numpy(tr["RT"]).float()[None].expand(N, -1, -1),
+        cam_extrinsic=torch.from_numpy(tr["RT"]).float()[None].expand(N, -1, -1) if single_view else torch.from_numpy(tr["RT"][camera_idx]).float()[None].expand(N, -1, -1),
         frame=torch.tensor(idcs),
         rgb=torch.zeros(N, 3, img_h, img_w),
     )

@@ -1,1 +1,2 @@
-python deps/video-head-tracker/optimize_tracking.py --config /buffer/project/neural-head-avatars/configs/tracking.ini
+python deps/video-head-tracker/optimize_tracking.py --config /buffer/project/neural-head-avatars/configs/tracking_yellow.ini
+python deps/video-head-tracker/optimize_tracking.py --config /buffer/project/neural-head-avatars/configs/tracking_black.ini

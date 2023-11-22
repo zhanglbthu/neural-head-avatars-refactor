@@ -24,9 +24,8 @@ def reenact_avatar(target_model: NHAOptimizer, driving_model: NHAOptimizer, targ
     base_drive_params = driving_model._create_flame_param_batch(base_drive_sample)
     base_target_params = target_model._create_flame_param_batch(base_target_sample)
 
-    tmp_dir_pred = Path("/root/autodl-tmp/retarget/image/pred")
-    tmp_dir_drive = Path("/root/autodl-tmp/retarget/image/drive")
-    
+    tmp_dir_pred = Path("/tmp/scene_reenactment_pred")
+    tmp_dir_drive = Path("/tmp/scene_reenactment_drive")
     os.makedirs(tmp_dir_drive, exist_ok=True)
     os.makedirs(tmp_dir_pred, exist_ok=True)
     os.makedirs(outpath.parent, exist_ok=True)
@@ -38,11 +37,27 @@ def reenact_avatar(target_model: NHAOptimizer, driving_model: NHAOptimizer, targ
         batch = dict_2_device(tracking_results_2_data_batch(driving_tracking_results, idcs.tolist()), target_model.device)
 
         rgb_driving = driving_model.forward(batch, symmetric_rgb_range=False)[:, :3].clamp(0,1)
-        
+
         # change camera parameters
         batch["cam_intrinsic"] = base_target_sample["cam_intrinsic"].expand_as(batch["cam_intrinsic"])
         batch["cam_extrinsic"] = base_target_sample["cam_extrinsic"].expand_as(batch["cam_extrinsic"])
-
+        
+        # save mesh
+        # root_path = "/root/autodl-tmp/retarget/test/mesh"
+        # for i in range(batch_size):
+        #     sample = dict(
+        #                 flame_shape = batch["flame_shape"][i][None],
+        #                 flame_expr = batch["flame_expr"][i][None],
+        #                 flame_pose = batch["flame_pose"][i][None],
+        #                 flame_trans = batch["flame_trans"][i][None],
+        #                 cam_intrinsic=batch["cam_intrinsic"][i][None],
+        #                 cam_extrinsic=batch["cam_extrinsic"][i][None],
+        #                 rgb=batch["rgb"][i][None],)
+        #     sample = dict_2_device(sample, target_model.device)
+        #     mesh_path = root_path + f"/{batch['frame'][i].item():04d}.obj"
+        #     target_model.get_mesh(sample, mesh_path)
+                
+        
         rgb_target = target_model.predict_reenaction(batch, driving_model=driving_model,
                                                      base_target_params=base_target_params,
                                                      base_driving_params=base_drive_params)

@@ -575,18 +575,19 @@ class FlameTracker:
         """
         if frame_idx > 0:
             self._initialize_from_previous(frame_idx, camera_idx)
-        else:
-            self._initialize_from_calibration(frame_idx, camera_idx)
+        # else:
+        #     self._initialize_from_calibration(frame_idx, camera_idx)
+        
         # if frame_idx > 0:
         #     self._initialize_from_previous(frame_idx, camera_idx)
         # if frame_idx < 60:
         #     self._initialize_from_calibration(frame_idx, camera_idx)
         # else:
         #     self._initialize_camera(frame_idx, camera_idx)
-        # if frame_idx % 10 == 0:
-        #     self._initialize_from_calibration(frame_idx, camera_idx)
-        # else:
-        #     self._initialize_camera(frame_idx, camera_idx)
+        if frame_idx % 10 == 0:
+            self._initialize_from_calibration(frame_idx, camera_idx)
+        else:
+            self._initialize_camera(frame_idx, camera_idx)
         # 如果frame_idx不在keyframes中，那么就初始化为上一帧的参数
         # if frame_idx not in self._config["keyframes"]:
         #     print("initialize from previous frame at frame {}".format(frame_idx))
@@ -610,8 +611,8 @@ class FlameTracker:
         ]:
             param[frame_idx].data = param[frame_idx - 1].detach().clone().data
             
-        for param in [self._translations, self._rotations]:
-            param[camera_idx][frame_idx].data = param[camera_idx][frame_idx - 1].detach().clone().data
+        # for param in [self._translations, self._rotations]:
+        #     param[camera_idx][frame_idx].data = param[camera_idx][frame_idx - 1].detach().clone().data
 
     def _initialize_camera(self, frame_idx, camera_idx):
         """
