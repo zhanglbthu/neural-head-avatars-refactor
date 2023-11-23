@@ -479,8 +479,16 @@ class RealDataModule(pl.LightningDataModule):
         else:
             with open(split_config, "r") as f:
                 splits = json.load(f)
-                train_split = splits["train"]
-                val_split = splits["val"]
+                train_num = splits["train"]
+                val_num = splits["val"]
+                
+        train_split = []
+        val_split = []
+        for index in range(train_num):
+            train_split.append(index)
+            
+        for index in range(val_num):
+            val_split.append(index)
 
         return train_split, val_split
 

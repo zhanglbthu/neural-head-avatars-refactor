@@ -1870,6 +1870,26 @@ class NHAOptimizer(pl.LightningModule):
 
         offsets_verts, _, mouth_conditioning = self._forward_flame(flame_params_offsets, return_mouth_conditioning=True)
 
+        # save mesh
+        root_path = '/root/autodl-tmp/retarget/mesh/nha/yellow2black'
+        # 创建路径
+        import os
+        if not os.path.exists(root_path):
+            os.makedirs(root_path)
+            
+        for frame_idx, offsets_vert in zip(batch["frame"], offsets_verts):
+            # 在offsets_vert的第0列增加一个维度：[N, 3] -> [1, N, 3]
+            offsets_vert = offsets_vert.unsqueeze(0)
+
+            output_mesh = root_path + f"/{frame_idx}.obj"
+            mesh = Meshes(
+                verts=offsets_vert,
+                faces=self._flame.faces[None].expand(len(offsets_vert), -1, -1),
+            )
+
+        save_obj(output_mesh, mesh.verts_packed(), mesh.faces_packed())
+
+
         # rgba prediction
         expr = flame_params_offsets["expr"]
         pose = torch.cat((flame_params_offsets["rotation"], flame_params_offsets["neck"], flame_params_offsets["jaw"],

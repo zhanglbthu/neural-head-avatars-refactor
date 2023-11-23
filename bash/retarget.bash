@@ -1,0 +1,1 @@
+python reenact_avatar.py --config configs/reenactment.ini

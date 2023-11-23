@@ -1,0 +1,1 @@
+python optimize_nha.py --config configs/optimize_avatar.ini
